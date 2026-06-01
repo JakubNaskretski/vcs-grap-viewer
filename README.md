@@ -71,8 +71,9 @@ Press <kbd>F5</kbd> to launch an Extension Development Host, then open the
 The in-plugin builder is a TypeScript port of graph-builder's Salesforce
 extractors, so generating a graph needs no Python. It covers objects, fields,
 Apex, triggers, flows, LWC, Aura, Visualforce, OmniStudio, permission
-sets/profiles, layouts, reports, rules, and more. (Apex uses a regex parser, so
-deep instance-call resolution is lighter than graph-builder's optional
+sets/profiles, layouts, reports, rules, and more. (Apex uses a regex parser with
+a lightweight per-method symbol table for `var.method()` resolution; deep
+instance-call resolution is still lighter than graph-builder's optional
 tree-sitter backend.)
 
 ## License
