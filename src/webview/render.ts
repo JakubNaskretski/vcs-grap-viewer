@@ -30,6 +30,11 @@ export function renderDetail(graph: Graph, byId: Map<string, GraphNode>, id: str
     );
   }
 
+  // Narrow the whole map to just this node and what it connects to.
+  parts.push(
+    `<div class="d-actions"><button class="d-focus" data-id="${esc(node.id)}" title="Show only this node and its connections">◎ Focus on this node</button></div>`,
+  );
+
   // Attributes — everything beyond the core fields, generically rendered.
   const attrs: string[] = [];
   for (const key of Object.keys(node).sort()) {

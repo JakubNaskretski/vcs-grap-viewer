@@ -42,6 +42,10 @@ const edgeFiltersEl = $<HTMLDivElement>("#edge-filters");
 const searchEl = $<HTMLInputElement>("#search");
 const statusEl = $<HTMLSpanElement>("#status");
 const modeEl = $<HTMLButtonElement>("#mode");
+const focusBarEl = $<HTMLSpanElement>("#focus-bar");
+const focusLabelEl = $<HTMLSpanElement>("#focus-label");
+const focusDepthEl = $<HTMLSelectElement>("#focus-depth");
+const focusClearEl = $<HTMLButtonElement>("#focus-clear");
 
 // ---- state ----
 let cy: Core | undefined;
@@ -52,6 +56,9 @@ const enabledEdgeTypes = new Set<string>();
 let selectedId: string | undefined;
 let settings: Settings = { physics: true, spacing: 150, animateOnHover: true, motionMaxNodes: 800 };
 let currentMeta: Meta | undefined;
+// Focus: when set, the map is narrowed to this node and its k-hop neighborhood.
+let focusId: string | undefined;
+let focusDepth = 1;
 
 // ---- gentle-drift animation state ----
 let driftRAF: number | undefined;
@@ -102,6 +109,8 @@ function updateModeUI(): void {
 function build(g: Graph): void {
   byId = new Map(g.nodes.map((n) => [n.id, n]));
   selectedId = undefined;
+  focusId = undefined;
+  updateFocusUI();
   clearDetail();
 
   const degree = new Map<string, number>();
@@ -369,9 +378,17 @@ function clearDetail(): void {
   detailEl.innerHTML = `<div class="placeholder">Select a node to see its details.</div>`;
 }
 
-// Detail-panel link navigation (event delegation).
+// Detail-panel interactions (event delegation): "Focus on this node" button, and
+// related-node links (which recentre + select the clicked node).
 detailEl.addEventListener("click", (e) => {
-  const link = (e.target as HTMLElement).closest(".node-link") as HTMLElement | null;
+  const target = e.target as HTMLElement;
+  const focusBtn = target.closest(".d-focus") as HTMLElement | null;
+  if (focusBtn?.dataset.id) {
+    e.preventDefault();
+    focusOnNode(focusBtn.dataset.id);
+    return;
+  }
+  const link = target.closest(".node-link") as HTMLElement | null;
   if (link?.dataset.id) {
     e.preventDefault();
     focusNode(link.dataset.id);
@@ -456,21 +473,109 @@ function filterRow(
 
 function applyFilters(): void {
   if (!cy) return;
+  const focusSet = focusVisibleIds(); // undefined = no focus restriction
   cy.batch(() => {
+    const visible = new Set<string>();
     cy!.nodes().forEach((n) => {
-      n.style("display", enabledNodeTypes.has(n.data("type")) ? "element" : "none");
+      const show = enabledNodeTypes.has(n.data("type")) && (!focusSet || focusSet.has(n.id()));
+      if (show) visible.add(n.id());
+      n.style("display", show ? "element" : "none");
     });
     cy!.edges().forEach((e) => {
       const ok =
-        enabledEdgeTypes.has(e.data("type")) &&
-        enabledNodeTypes.has(e.source().data("type")) &&
-        enabledNodeTypes.has(e.target().data("type"));
+        enabledEdgeTypes.has(e.data("type")) && visible.has(e.source().id()) && visible.has(e.target().id());
       e.style("display", ok ? "element" : "none");
     });
   });
   applySearch();
   updateStatus();
 }
+
+// ---- focus (isolate one node + its neighborhood) ----
+// The set of node ids reachable from the focused node within `focusDepth` hops,
+// traversing only type-enabled nodes/edges. Returns undefined when there's no
+// focus (or the focused node is itself hidden by a type filter) — i.e. no
+// restriction. Computed from the graph data, so it's independent of render state.
+function focusVisibleIds(): Set<string> | undefined {
+  if (!focusId || !graph) return undefined;
+  const nodeOk = (id: string): boolean => {
+    const n = byId.get(id);
+    return !!n && enabledNodeTypes.has(n.type);
+  };
+  if (!nodeOk(focusId)) return undefined;
+
+  const adj = new Map<string, string[]>();
+  const link = (a: string, b: string) => {
+    const list = adj.get(a);
+    if (list) list.push(b);
+    else adj.set(a, [b]);
+  };
+  for (const e of graph.edges) {
+    if (!enabledEdgeTypes.has(e.type) || !nodeOk(e.src) || !nodeOk(e.dst)) continue;
+    link(e.src, e.dst);
+    link(e.dst, e.src);
+  }
+
+  const seen = new Set<string>([focusId]);
+  let frontier = [focusId];
+  for (let hop = 0; hop < focusDepth; hop++) {
+    const next: string[] = [];
+    for (const id of frontier) {
+      for (const nb of adj.get(id) ?? []) {
+        if (!seen.has(nb)) {
+          seen.add(nb);
+          next.push(nb);
+        }
+      }
+    }
+    if (next.length === 0) break;
+    frontier = next;
+  }
+  return seen;
+}
+
+function focusOnNode(id: string): void {
+  if (!cy || cy.getElementById(id).empty()) return;
+  focusId = id;
+  applyFilters();
+  updateFocusUI();
+  select(id);
+  fitVisible(260);
+}
+
+function clearFocus(): void {
+  if (!focusId) return;
+  focusId = undefined;
+  applyFilters();
+  updateFocusUI();
+  fitVisible(220);
+}
+
+function fitVisible(duration: number): void {
+  if (!cy) return;
+  const vis = cy.nodes().filter((n) => n.style("display") !== "none");
+  if (vis.nonempty()) cy.animate({ fit: { eles: vis, padding: 50 }, duration });
+}
+
+function updateFocusUI(): void {
+  if (!focusId) {
+    focusBarEl.hidden = true;
+    return;
+  }
+  focusBarEl.hidden = false;
+  const n = byId.get(focusId);
+  focusLabelEl.textContent = n ? n.label : focusId;
+  focusLabelEl.title = focusId;
+}
+
+focusDepthEl.addEventListener("change", () => {
+  focusDepth = Math.max(1, Number(focusDepthEl.value) || 1);
+  if (focusId) {
+    applyFilters();
+    fitVisible(220);
+  }
+});
+focusClearEl.addEventListener("click", () => clearFocus());
 
 // "all / none" quick toggles.
 document.querySelectorAll<HTMLElement>("[data-all]").forEach((el) => {
@@ -500,6 +605,27 @@ function syncChecks(container: HTMLElement, checked: boolean): void {
 
 // ---- search ----
 searchEl.addEventListener("input", () => applySearch());
+// Enter focuses the best match: exact label wins, otherwise the first partial —
+// the quick path to "narrow to this one object/class and its connections".
+searchEl.addEventListener("keydown", (e) => {
+  if (e.key !== "Enter") return;
+  e.preventDefault();
+  const id = bestSearchMatch();
+  if (id) focusOnNode(id);
+});
+
+function bestSearchMatch(): string | undefined {
+  if (!graph) return undefined;
+  const term = searchEl.value.trim().toLowerCase();
+  if (!term) return undefined;
+  let partial: string | undefined;
+  for (const n of graph.nodes) {
+    const label = n.label.toLowerCase();
+    if (label === term) return n.id;
+    if (!partial && label.includes(term)) partial = n.id;
+  }
+  return partial;
+}
 
 function applySearch(): void {
   if (!cy) return;

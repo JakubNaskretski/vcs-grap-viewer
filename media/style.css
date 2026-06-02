@@ -97,6 +97,65 @@ button:hover {
   display: none;
 }
 
+/* Focus bar — shows the currently isolated node, its hop depth, and a clear button. */
+.focus-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 4px 1px 8px;
+  font-size: 11px;
+  border: 1px solid var(--vscode-focusBorder);
+  border-radius: 11px;
+}
+
+.focus-bar[hidden] {
+  display: none;
+}
+
+.focus-tag {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--vscode-descriptionForeground);
+}
+
+.focus-label {
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.focus-depth {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.focus-depth select {
+  font-size: 11px;
+  padding: 0 2px;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, transparent);
+  border-radius: 3px;
+}
+
+#focus-clear {
+  padding: 1px 7px;
+  font-size: 11px;
+}
+
+/* Detail-panel "Focus on this node" action. */
+.d-actions {
+  margin: 0 0 12px;
+}
+
+.d-focus {
+  font-size: 12px;
+}
+
 /* Filters sidebar */
 #filters {
   grid-row: 2;

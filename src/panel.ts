@@ -203,9 +203,21 @@ export class GraphPanel {
 <body>
   <div id="app">
     <div id="toolbar">
-      <input id="search" type="search" placeholder="Search nodes…" autocomplete="off" spellcheck="false" />
+      <input id="search" type="search" placeholder="Search nodes… (Enter to focus)" autocomplete="off" spellcheck="false" />
       <span id="status"></span>
       <button id="mode" class="mode-btn" hidden></button>
+      <span id="focus-bar" class="focus-bar" hidden>
+        <span class="focus-tag">focus</span>
+        <span id="focus-label" class="focus-label"></span>
+        <label class="focus-depth">depth
+          <select id="focus-depth">
+            <option value="1">1</option>
+            <option value="2">2</option>
+            <option value="3">3</option>
+          </select>
+        </label>
+        <button id="focus-clear" title="Show the whole graph again">✕ clear</button>
+      </span>
       <span class="spacer"></span>
       <button id="relayout" title="Re-run layout">Re-layout</button>
       <button id="fit" title="Fit graph to view">Fit</button>

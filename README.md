@@ -17,6 +17,10 @@ click any node to read its attributes and relationships.
   toolbar expands to every node (behind a confirmation, since it can be heavy).
 - **Filters** — toggle node types and edge types on/off to focus the map; search
   nodes by name. Work in either the container map or the full graph.
+- **Focus a single node** — click a node and hit **Focus on this node** (or type its
+  name in the search box and press **Enter**) to narrow the map to just that node and
+  its neighborhood. A depth control (1–3 hops) widens the ring; **clear** restores the
+  full view — for when you want *just this one object/class and what it touches*.
 - **Node details** — click a node to see its attributes plus every incoming and
   outgoing relationship, grouped by edge type. Click a related node to jump to it.
 - **Graphs side panel** — a library of your graphs in the Activity Bar. Generate,

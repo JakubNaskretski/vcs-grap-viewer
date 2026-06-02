@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.0
+
+### Focus a single node
+
+- **Isolate one object/class and its connections.** Click a node and choose
+  **Focus on this node**, or type a name in the search box and press **Enter** —
+  the map narrows to just that node and its neighborhood. A **depth** control
+  (1–3 hops) widens the ring; **clear** restores the full view. The focus composes
+  with the type filters, so you can, say, focus one object and still hide its
+  fields.
+- Search now does two things: typing dims non-matches (quick locate); pressing
+  Enter focuses the best match (exact label wins, else the first partial).
+
 ## 0.2.0
 
 ### Large-graph handling
