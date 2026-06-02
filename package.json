@@ -3,7 +3,7 @@
   "displayName": "Graph Viewer",
   "description": "Visualize and explore a metadata graph (nodes + edges) as an interactive, filterable map — an Obsidian-style graph view inside your editor.",
   "version": "0.1.0",
-  "publisher": "vcs-grap-viewer",
+  "publisher": "Skrety",
   "license": "MIT",
   "repository": {
     "type": "git",
