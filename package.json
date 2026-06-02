@@ -45,7 +45,7 @@
         "command": "graphViewer.generate",
         "title": "Generate Graph from Folder…",
         "category": "Graph Viewer",
-        "icon": "$(tools)"
+        "icon": "$(type-hierarchy)"
       },
       {
         "command": "graphViewer.import",
@@ -161,11 +161,11 @@
         "graphViewer.physics": {
           "type": "boolean",
           "default": true,
-          "description": "Keep the graph in continuous motion so it gently settles and reacts to dragging and hovering (Obsidian-like). Turn off for a static layout."
+          "description": "Gently drift the nodes (Obsidian-style floating). Auto-disables above 'Motion Max Nodes' to keep large graphs responsive. Turn off for a static layout."
         },
         "graphViewer.spacing": {
           "type": "number",
-          "default": 100,
+          "default": 150,
           "minimum": 20,
           "maximum": 500,
           "description": "Spacing between nodes. Higher values spread the graph out more."
@@ -173,7 +173,13 @@
         "graphViewer.animateOnHover": {
           "type": "boolean",
           "default": true,
-          "description": "Gently nudge and highlight a node's neighbors when you hover it (requires Physics for the motion)."
+          "description": "On hover, dim the rest of the graph and enlarge + highlight the node and its neighbors."
+        },
+        "graphViewer.motionMaxNodes": {
+          "type": "number",
+          "default": 800,
+          "minimum": 0,
+          "description": "Above this node count the gentle drift turns off (large graphs stay static and responsive)."
         }
       }
     }

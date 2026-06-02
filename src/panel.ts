@@ -56,7 +56,8 @@ export class GraphPanel {
         if (
           e.affectsConfiguration("graphViewer.physics") ||
           e.affectsConfiguration("graphViewer.spacing") ||
-          e.affectsConfiguration("graphViewer.animateOnHover")
+          e.affectsConfiguration("graphViewer.animateOnHover") ||
+          e.affectsConfiguration("graphViewer.motionMaxNodes")
         ) {
           this.postSettings();
         }
@@ -66,12 +67,13 @@ export class GraphPanel {
     );
   }
 
-  private readSettings(): { physics: boolean; spacing: number; animateOnHover: boolean } {
+  private readSettings(): { physics: boolean; spacing: number; animateOnHover: boolean; motionMaxNodes: number } {
     const c = vscode.workspace.getConfiguration("graphViewer");
     return {
       physics: c.get<boolean>("physics", true),
-      spacing: c.get<number>("spacing", 100),
+      spacing: c.get<number>("spacing", 150),
       animateOnHover: c.get<boolean>("animateOnHover", true),
+      motionMaxNodes: c.get<number>("motionMaxNodes", 800),
     };
   }
 

@@ -1,12 +1,10 @@
-import cytoscape, { Core, ElementDefinition, Layouts, NodeSingular } from "cytoscape";
+import cytoscape, { Core, ElementDefinition, NodeSingular } from "cytoscape";
 import fcose from "cytoscape-fcose";
-import cola from "cytoscape-cola";
 import { Graph, GraphNode } from "../graph/types";
 import { typeColor } from "../graph/labels";
 import { renderDetail } from "./render";
 
 cytoscape.use(fcose);
-cytoscape.use(cola);
 
 interface VsCodeApi {
   postMessage(msg: unknown): void;
@@ -18,6 +16,7 @@ interface Settings {
   physics: boolean;
   spacing: number;
   animateOnHover: boolean;
+  motionMaxNodes: number;
 }
 
 const accent =
@@ -39,8 +38,13 @@ let byId = new Map<string, GraphNode>();
 const enabledNodeTypes = new Set<string>();
 const enabledEdgeTypes = new Set<string>();
 let selectedId: string | undefined;
-let settings: Settings = { physics: true, spacing: 100, animateOnHover: true };
-let sim: Layouts | undefined; // the running continuous (cola) simulation, when physics is on
+let settings: Settings = { physics: true, spacing: 150, animateOnHover: true, motionMaxNodes: 800 };
+
+// ---- gentle-drift animation state ----
+let driftRAF: number | undefined;
+const driftHomes = new Map<string, { x: number; y: number }>();
+const driftParams = new Map<string, { ax: number; ay: number; fx: number; fy: number; px: number; py: number }>();
+let driftT0 = 0;
 
 window.addEventListener("message", (event) => {
   const msg = event.data;
@@ -86,12 +90,13 @@ function build(g: Graph): void {
     elements.push({ data: { id: `e${i}`, source: e.src, target: e.dst, type: e.type } });
   });
 
-  stopSim();
+  stopDrift();
   cy?.destroy();
   cy = cytoscape({
     container: cyEl,
     elements,
     wheelSensitivity: 0.2,
+    textureOnViewport: true, // faster pan/zoom on big graphs
     style: buildStyle(maxDeg),
   });
 
@@ -101,11 +106,11 @@ function build(g: Graph): void {
   });
   cy.on("mouseover", "node", (evt) => onHover(evt.target as NodeSingular));
   cy.on("mouseout", "node", (evt) => offHover(evt.target as NodeSingular));
-  // Wake the simulation while the user manipulates a node so neighbors react;
-  // it settles and stops on its own afterward.
-  cy.on("grab", "node", () => wakePhysics());
-  cy.on("drag", "node", () => {
-    if (settings.physics && !sim) startSettle();
+  // Dragging repositions a node; remember its new resting spot so it drifts there.
+  cy.on("dragfree", "node", (evt) => {
+    const n = evt.target as NodeSingular;
+    const p = n.position();
+    driftHomes.set(n.id(), { x: p.x, y: p.y });
   });
 
   buildFilters(g);
@@ -114,48 +119,78 @@ function build(g: Graph): void {
   updateStatus();
 }
 
-// ---- layout & physics ----
+// ---- layout & motion ----
 function runLayout(): void {
   if (!cy) return;
-  stopSim();
+  stopDrift();
   const count = cy.nodes().length;
   const layout = cy.layout(fcoseOptions(settings.spacing, count));
-  // After the initial force layout, let physics settle the graph once — it then
-  // stops on its own, so an idle graph costs nothing. Interaction re-wakes it.
   layout.one("layoutstop", () => {
-    if (settings.physics && !document.hidden) startSettle();
+    // Defer one frame so the container has its real size, then land zoomed-in
+    // centered on the most-connected node (the natural focal point, and the
+    // biggest one since nodes are sized by degree). Absolute zoom — no reliance
+    // on reading container pixels (that was the bug).
+    requestAnimationFrame(() => {
+      if (!cy) return;
+      cy.resize();
+      cy.zoom(1.5);
+      if (cy.nodes().length > 0) {
+        cy.center(cy.nodes().max((n) => Number(n.data("deg")) || 0).ele);
+      }
+      if (driftEligible()) startDrift();
+    });
   });
   layout.run();
 }
 
-// Run a finite physics pass that settles the graph and then stops itself.
-// `sim` holds the handle only while it is actually running.
-function startSettle(): void {
-  if (!cy || !settings.physics) return;
-  stopSim();
-  const layout = cy.layout(colaOptions(settings.spacing));
-  sim = layout;
-  layout.one("layoutstop", () => {
-    if (sim === layout) sim = undefined;
+// Gentle continuous drift: each node bobs a few px on its own slow sine wave
+// around its resting spot (stable — always returns home; cheap math). The hovered
+// node + neighbors bob bigger. Auto-disabled above `motionMaxNodes`.
+function driftEligible(): boolean {
+  return !!cy && settings.physics && !document.hidden && cy.nodes().length <= settings.motionMaxNodes;
+}
+
+function startDrift(): void {
+  if (!cy || !driftEligible()) return;
+  stopDrift();
+  driftHomes.clear();
+  driftParams.clear();
+  cy.nodes().forEach((n) => {
+    const p = n.position();
+    driftHomes.set(n.id(), { x: p.x, y: p.y });
+    driftParams.set(n.id(), {
+      ax: 2.5 + Math.random() * 3,
+      ay: 2.5 + Math.random() * 3,
+      fx: 0.3 + Math.random() * 0.5,
+      fy: 0.3 + Math.random() * 0.5,
+      px: Math.random() * Math.PI * 2,
+      py: Math.random() * Math.PI * 2,
+    });
   });
-  layout.run();
+  driftT0 = performance.now();
+  const tick = () => {
+    if (!cy || driftRAF === undefined) return;
+    const t = (performance.now() - driftT0) / 1000;
+    cy.batch(() => {
+      cy!.nodes().forEach((n) => {
+        if (n.grabbed()) return; // don't fight an active drag
+        const home = driftHomes.get(n.id());
+        const pr = driftParams.get(n.id());
+        if (!home || !pr) return;
+        n.position({
+          x: home.x + pr.ax * Math.sin(t * pr.fx + pr.px),
+          y: home.y + pr.ay * Math.sin(t * pr.fy + pr.py),
+        });
+      });
+    });
+    driftRAF = requestAnimationFrame(tick);
+  };
+  driftRAF = requestAnimationFrame(tick);
 }
 
-// Re-energize physics on interaction, optionally absorbing a small hover nudge.
-function wakePhysics(node?: NodeSingular): void {
-  if (!settings.physics || !cy) return;
-  if (node && settings.animateOnHover) {
-    const p = node.position();
-    node.position({ x: p.x + (Math.random() * 14 - 7), y: p.y + (Math.random() * 14 - 7) });
-  }
-  if (!sim) startSettle();
-}
-
-function stopSim(): void {
-  if (sim) {
-    sim.stop();
-    sim = undefined;
-  }
+function stopDrift(): void {
+  if (driftRAF !== undefined) cancelAnimationFrame(driftRAF);
+  driftRAF = undefined;
 }
 
 function fcoseOptions(spacing: number, count: number): cytoscape.LayoutOptions {
@@ -170,22 +205,6 @@ function fcoseOptions(spacing: number, count: number): cytoscape.LayoutOptions {
     idealEdgeLength: spacing,
     nodeSeparation: Math.max(20, spacing * 0.85),
     packComponents: true,
-  } as unknown as cytoscape.LayoutOptions;
-}
-
-function colaOptions(spacing: number): cytoscape.LayoutOptions {
-  return {
-    name: "cola",
-    infinite: false, // settle, then stop — re-woken on interaction (low idle cost)
-    fit: false,
-    animate: true,
-    randomize: false, // continue from the fcose positions
-    maxSimulationTime: 2000,
-    convergenceThreshold: 0.01,
-    edgeLength: spacing,
-    nodeSpacing: Math.max(8, spacing * 0.4),
-    avoidOverlap: true,
-    handleDisconnected: true,
   } as unknown as cytoscape.LayoutOptions;
 }
 
@@ -205,8 +224,8 @@ function buildStyle(maxDeg: number): cytoscape.StylesheetStyle[] {
         "text-margin-y": 2,
         "min-zoomed-font-size": 8,
         "border-width": 0,
-        "transition-property": "border-width border-color background-blacken",
-        "transition-duration": 120,
+        "transition-property": "width height border-width border-color background-blacken opacity",
+        "transition-duration": 130,
       } as cytoscape.Css.Node,
     },
     {
@@ -225,25 +244,40 @@ function buildStyle(maxDeg: number): cytoscape.StylesheetStyle[] {
         "arrow-scale": 0.6,
       },
     },
-    { selector: "node.hover", style: { "border-width": 2, "border-color": accent, "border-opacity": 0.7, "background-blacken": -0.15 } },
+    {
+      selector: "node.hover",
+      style: {
+        width: `mapData(deg, 0, ${maxDeg}, 24, 76)`,
+        height: `mapData(deg, 0, ${maxDeg}, 24, 76)`,
+        "border-width": 3,
+        "border-color": accent,
+        "border-opacity": 1,
+        "background-blacken": -0.2,
+        "z-index": 20,
+      },
+    },
     { selector: "node.sel", style: { "border-width": 3, "border-color": accent, "border-style": "solid", "border-opacity": 1 } },
     { selector: "node.hl", style: { "border-width": 2, "border-color": accent, "border-style": "solid", "border-opacity": 1 } },
     { selector: "edge.hl", style: { "line-color": accent, "target-arrow-color": accent, "line-opacity": 1, width: 2, "z-index": 9 } },
     { selector: ".dim", style: { opacity: 0.12 } },
+    { selector: ".unfocused", style: { opacity: 0.12 } },
   ];
 }
 
 // ---- hover ----
+// Hover dims everything else and enlarges + highlights the hovered node and its
+// neighbors. It never moves anything (the gentle drift keeps running underneath).
 function onHover(node: NodeSingular): void {
+  if (!settings.animateOnHover || !cy) return;
+  const focus = node.closedNeighborhood(); // the node + neighbor nodes + connecting edges
+  cy.elements().addClass("unfocused");
+  focus.removeClass("unfocused");
   node.addClass("hover");
   node.neighborhood("node").addClass("hover");
-  // A tiny perturbation + a brief physics wake makes the neighborhood ripple and
-  // resettle (gated on animateOnHover, and on physics inside wakePhysics).
-  if (settings.animateOnHover) wakePhysics(node);
 }
 
 function offHover(_node: NodeSingular): void {
-  cy?.nodes().removeClass("hover");
+  cy?.elements().removeClass("unfocused hover");
 }
 
 // ---- selection ----
@@ -295,17 +329,18 @@ function applySettings(next: Settings): void {
   settings = next;
   if (!cy) return;
   if (prev.spacing !== next.spacing) {
-    runLayout(); // re-space everything (re-runs the initial layout, then physics)
-  } else if (prev.physics !== next.physics) {
-    if (next.physics) startSettle();
-    else stopSim();
+    runLayout(); // re-space everything, then resume drift
+  } else if (prev.physics !== next.physics || prev.motionMaxNodes !== next.motionMaxNodes) {
+    if (driftEligible()) startDrift();
+    else stopDrift();
   }
 }
 
-// Pause the simulation while the tab is hidden so it doesn't burn CPU in the
+// Pause the drift while the tab is hidden so it doesn't burn CPU in the
 // background; resume when shown again.
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden) stopSim();
+  if (document.hidden) stopDrift();
+  else if (driftEligible()) startDrift();
 });
 
 // ---- filters ----

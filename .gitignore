@@ -4,9 +4,6 @@ out/
 *.vsix
 .DS_Store
 
-# Local harness / editor state — never publish.
-.claude/
-
 # Never ship graph data or source exports — these are produced locally and
 # may carry org-derived names. Local-only, never pushed anywhere.
 *.graph.json

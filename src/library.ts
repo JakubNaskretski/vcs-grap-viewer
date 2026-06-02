@@ -104,7 +104,8 @@ function toDisk(graph: Graph) {
   };
 }
 
-/** TreeView backing the "Graphs" side panel. */
+/** TreeView backing the "Graphs" side panel — the stored graphs list. Actions
+ *  (generate / import / refresh) live as icon buttons in the view's title bar. */
 export class GraphLibraryProvider implements vscode.TreeDataProvider<GraphEntry> {
   private readonly _onDidChangeTreeData = new vscode.EventEmitter<void>();
   readonly onDidChangeTreeData = this._onDidChangeTreeData.event;

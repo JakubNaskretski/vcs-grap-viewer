@@ -82,7 +82,7 @@ const TYPE_COLORS: Record<string, string> = {
   listview: "#4C8DFF",
   globalvalueset: "#4C8DFF",
   custommetadatarecord: "#4C8DFF",
-  // Apex — orange
+  // Apex — amber
   apexclass: "#FF8C42",
   apexmethod: "#FFB066",
   // Triggers — pink
