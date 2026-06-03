@@ -147,13 +147,27 @@ button:hover {
   font-size: 11px;
 }
 
-/* Detail-panel "Focus on this node" action. */
+/* Detail-panel actions ("Expand members" / "Focus on this node"). */
 .d-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
   margin: 0 0 12px;
 }
 
-.d-focus {
+.d-focus,
+.d-expand {
   font-size: 12px;
+}
+
+/* Expand is the primary drill-in action, so give it the accent button colors. */
+.d-expand {
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
+}
+
+.d-expand:hover {
+  background: var(--vscode-button-hoverBackground);
 }
 
 /* Filters sidebar */

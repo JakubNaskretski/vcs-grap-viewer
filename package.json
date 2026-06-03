@@ -2,7 +2,7 @@
   "name": "vcs-grap-viewer",
   "displayName": "Graph Viewer",
   "description": "Visualize and explore a metadata graph (nodes + edges) as an interactive, filterable map — an Obsidian-style graph view inside your editor.",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "publisher": "Skrety",
   "license": "MIT",
   "repository": {
@@ -180,6 +180,12 @@
           "default": 800,
           "minimum": 0,
           "description": "Above this node count the gentle drift turns off (large graphs stay static and responsive)."
+        },
+        "graphViewer.maxRelatedNodes": {
+          "type": "number",
+          "default": 10,
+          "minimum": 0,
+          "description": "When you expand a node in the container view, how many related main nodes (its most-connected neighbors) to reveal alongside its members. Higher shows more of the surrounding graph per step; lower keeps each drill-in tightly focused."
         }
       }
     }

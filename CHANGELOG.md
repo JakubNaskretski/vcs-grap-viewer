@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.5.0
+
+### Expand a container into its members
+
+- In the container map, a rolled-up node now has an **⊕ Expand members** action in
+  the detail panel. Expanding **drills in**: the map narrows to that node, its
+  members (Apex methods, object fields, flow elements), and the related main nodes
+  those members connect to (kept collapsed). Member→member calls and member→neighbor
+  edges are drawn, with the far end rolled up to its container.
+- **Walk the graph one step at a time.** Each related node can be expanded in turn,
+  so you can follow connections class-by-class without ever rendering the whole
+  graph. An **exploring · reset** pill returns to the overview; **⊖ Collapse
+  members** rolls a node back up.
+- New **Max Related Nodes** setting (`graphViewer.maxRelatedNodes`, default `10`)
+  controls how many related nodes each expansion reveals; when more are connected,
+  the detail panel notes how many were hidden.
+- The drill-in is computed in the extension host, which sends only the focused
+  slice to the view — so it stays fast on large graphs.
+
 ## 0.4.0
 
 ### Drill into a type and pick individual nodes

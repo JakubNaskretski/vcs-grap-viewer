@@ -1,7 +1,7 @@
 import * as path from "path";
 import * as vscode from "vscode";
 import { Graph } from "./graph/types";
-import { isNestedType, rollupToContainers } from "./graph/rollup";
+import { exploreView, isNestedType, rollupToContainers } from "./graph/rollup";
 import { GraphSource } from "./sources";
 
 const BIG_GRAPH = 2500; // above this many nodes, default to the container-level view
@@ -20,6 +20,7 @@ export class GraphPanel {
   private fullGraph: Graph | undefined;
   private rolledGraph: Graph | undefined; // cached container-level view
   private viewMode: "auto" | "containers" | "all" = "auto";
+  private expanded = new Set<string>(); // containers drilled into (container view only)
   private webviewReady = false;
 
   static async createOrShow(context: vscode.ExtensionContext, source: GraphSource): Promise<void> {
@@ -66,6 +67,10 @@ export class GraphPanel {
         ) {
           this.postSettings();
         }
+        // The related-node cap changes the current drill-in, so re-render it.
+        if (e.affectsConfiguration("graphViewer.maxRelatedNodes") && this.expanded.size > 0) {
+          this.post();
+        }
       },
       null,
       this.disposables,
@@ -92,6 +97,7 @@ export class GraphPanel {
   async setSource(source: GraphSource): Promise<void> {
     this.source = source;
     this.viewMode = "auto"; // a new graph picks its own default (size-based)
+    this.expanded.clear();
     this.panel.title = `Graph: ${source.label}`;
     this.setupWatcher(source);
     await this.reload();
@@ -103,6 +109,7 @@ export class GraphPanel {
     try {
       this.fullGraph = await this.source.load();
       this.rolledGraph = undefined;
+      this.expanded.clear(); // ids may have changed; start from the overview
       this.post();
     } catch (err) {
       void vscode.window.showErrorMessage(`Graph Viewer: ${(err as Error).message}`);
@@ -126,12 +133,21 @@ export class GraphPanel {
     this.disposables.push(this.watcher);
   }
 
-  private onMessage(msg: { type?: string; mode?: "containers" | "all" }): void {
+  private onMessage(msg: { type?: string; mode?: "containers" | "all"; id?: string }): void {
     if (msg?.type === "ready") {
       this.webviewReady = true;
       this.post();
     } else if (msg?.type === "setViewMode") {
       void this.setViewMode(msg.mode);
+    } else if (msg?.type === "expand" && msg.id) {
+      this.expanded.add(msg.id);
+      this.post(msg.id);
+    } else if (msg?.type === "collapse" && msg.id) {
+      this.expanded.delete(msg.id);
+      this.post();
+    } else if (msg?.type === "resetExploration") {
+      this.expanded.clear();
+      this.post();
     }
   }
 
@@ -150,23 +166,40 @@ export class GraphPanel {
       if (choice !== "Show all") return;
     }
     this.viewMode = mode;
+    this.expanded.clear(); // overview / full are their own thing; drop the drill-in
     this.post();
   }
 
-  private post(): void {
+  private maxRelated(): number {
+    return Math.max(0, vscode.workspace.getConfiguration("graphViewer").get<number>("maxRelatedNodes", 10));
+  }
+
+  /** Push the current view to the webview. `expandRoot` (the container just
+   *  expanded) is echoed back so the webview can keep it selected and report any
+   *  related nodes dropped past the cap. */
+  private post(expandRoot?: string): void {
     if (!this.webviewReady || !this.fullGraph || !this.source) return;
     const total = this.fullGraph.nodes.length;
     const mode = this.viewMode === "auto" ? (total > BIG_GRAPH ? "containers" : "all") : this.viewMode;
+    const exploring = mode === "containers" && this.expanded.size > 0;
     let graph = this.fullGraph;
+    let truncatedRoot = 0;
     if (mode === "containers") {
-      this.rolledGraph ??= rollupToContainers(this.fullGraph);
-      graph = this.rolledGraph;
+      if (exploring) {
+        const res = exploreView(this.fullGraph, this.expanded, this.maxRelated());
+        graph = res.graph;
+        if (expandRoot) truncatedRoot = res.truncated.get(expandRoot) ?? 0;
+      } else {
+        this.rolledGraph ??= rollupToContainers(this.fullGraph);
+        graph = this.rolledGraph;
+      }
     }
     void this.panel.webview.postMessage({
       type: "setGraph",
       graph,
       label: this.source.label,
       settings: this.readSettings(),
+      expandRoot,
       meta: {
         mode,
         totalNodes: total,
@@ -174,6 +207,10 @@ export class GraphPanel {
         shownNodes: graph.nodes.length,
         shownEdges: graph.edges.length,
         hasNested: this.fullGraph.nodes.some((n) => isNestedType(n.type)),
+        exploring,
+        expanded: [...this.expanded],
+        expandedCount: this.expanded.size,
+        truncatedRoot,
       },
     });
   }
@@ -217,6 +254,11 @@ export class GraphPanel {
           </select>
         </label>
         <button id="focus-clear" title="Show the whole graph again">✕ clear</button>
+      </span>
+      <span id="explore-bar" class="focus-bar" hidden>
+        <span class="focus-tag">exploring</span>
+        <span id="explore-count" class="focus-label"></span>
+        <button id="explore-reset" title="Collapse everything and return to the overview">✕ reset</button>
       </span>
       <span class="spacer"></span>
       <button id="relayout" title="Re-run layout">Re-layout</button>

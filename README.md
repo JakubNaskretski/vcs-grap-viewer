@@ -15,6 +15,13 @@ click any node to read its attributes and relationships.
   roll up into their parent object/class/flow, edges and all, so you get a readable
   module-level view instead of a frozen hairball. A **Show all** toggle in the
   toolbar expands to every node (behind a confirmation, since it can be heavy).
+- **Expand a container in place** — in the container map, select a rolled-up node
+  (an Apex class, object, or flow) and hit **⊕ Expand members** to *drill in*: the
+  map narrows to that node, its members (methods/fields/elements), and the related
+  nodes they connect to (kept collapsed). Expand those in turn to **walk the graph
+  one step at a time**; **⊖ Collapse members** rolls a node back up and **reset**
+  returns to the overview. *Max Related Nodes* controls how many neighbors each
+  step reveals.
 - **Filters** — toggle node types and edge types on/off to focus the map; search
   nodes by name. Work in either the container map or the full graph. Each **node
   type expands** into a searchable list of its own nodes, so you can drill into,
@@ -69,6 +76,7 @@ The graph is plain JSON; any tool that emits the same shape works:
 | `graphViewer.spacing`         | `150`   | Spacing between nodes (20–500). Higher spreads the graph out more. |
 | `graphViewer.animateOnHover`  | `true`  | On hover, dim the rest of the graph and enlarge + highlight the node and its neighbors. |
 | `graphViewer.motionMaxNodes`  | `800`   | Above this node count the gentle drift turns off so large graphs stay responsive. |
+| `graphViewer.maxRelatedNodes` | `10`    | When you expand a container node, how many related main nodes to reveal per step (0–∞). |
 
 Appearance settings apply live — no reload needed.
 

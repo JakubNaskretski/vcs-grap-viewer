@@ -3,8 +3,15 @@ import { edgeInLabel, edgeOutLabel, typeColor } from "../graph/labels";
 
 const CORE_KEYS = new Set(["id", "type", "label", "external", "childCount"]);
 
+export interface DetailCtx {
+  /** Are we in the container view (where expanding a node makes sense)? */
+  containerMode: boolean;
+  /** Containers currently drilled into. */
+  expanded: Set<string>;
+}
+
 /** Build the detail-panel HTML for one node: header, attributes, relationships. */
-export function renderDetail(graph: Graph, byId: Map<string, GraphNode>, id: string): string {
+export function renderDetail(graph: Graph, byId: Map<string, GraphNode>, id: string, ctx?: DetailCtx): string {
   const node = byId.get(id);
   if (!node) {
     return `<div class="placeholder">Node not found.</div>`;
@@ -21,19 +28,28 @@ export function renderDetail(graph: Graph, byId: Map<string, GraphNode>, id: str
   parts.push(`<div class="d-sub">${sub.join(" ")}</div>`);
   parts.push(`<div class="d-id" title="node id">${esc(node.id)}</div>`);
 
-  // Container-view rollup hint: how many nested nodes were collapsed into this one.
+  // Actions. In the container view a node with rolled-up members can be expanded
+  // in place (revealing its members + related nodes) or collapsed back; "Focus"
+  // narrows the map to the node and what it connects to.
   const childCount = typeof node.childCount === "number" ? node.childCount : 0;
-  if (childCount > 0) {
+  const canExpand = !!ctx?.containerMode && childCount > 0;
+  const actions: string[] = [];
+  if (canExpand) {
     const word = childCount === 1 ? "member" : "members";
-    parts.push(
-      `<p class="muted" style="margin:0 0 10px">▣ ${childCount} nested ${word} rolled up — use “Show all” to expand.</p>`,
-    );
+    if (ctx!.expanded.has(node.id)) {
+      actions.push(
+        `<button class="d-expand" data-id="${esc(node.id)}" data-action="collapse" title="Roll this node's members back into it">⊖ Collapse members</button>`,
+      );
+    } else {
+      actions.push(
+        `<button class="d-expand" data-id="${esc(node.id)}" data-action="expand" title="Reveal this node's ${childCount} ${word} and the nodes they connect to">⊕ Expand ${childCount} ${word}</button>`,
+      );
+    }
   }
-
-  // Narrow the whole map to just this node and what it connects to.
-  parts.push(
-    `<div class="d-actions"><button class="d-focus" data-id="${esc(node.id)}" title="Show only this node and its connections">◎ Focus on this node</button></div>`,
+  actions.push(
+    `<button class="d-focus" data-id="${esc(node.id)}" title="Show only this node and its connections">◎ Focus on this node</button>`,
   );
+  parts.push(`<div class="d-actions">${actions.join(" ")}</div>`);
 
   // Attributes — everything beyond the core fields, generically rendered.
   const attrs: string[] = [];

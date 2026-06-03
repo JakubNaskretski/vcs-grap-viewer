@@ -4,6 +4,14 @@ import { Graph, GraphNode } from "../graph/types";
 import { typeColor } from "../graph/labels";
 import { renderDetail } from "./render";
 
+interface SetGraphMsg {
+  type: "setGraph";
+  graph: Graph;
+  settings?: Settings;
+  meta?: Meta;
+  expandRoot?: string;
+}
+
 cytoscape.use(fcose);
 
 interface VsCodeApi {
@@ -28,6 +36,12 @@ interface Meta {
   shownNodes: number;
   shownEdges: number;
   hasNested: boolean;
+  // Drill-in state: which containers are expanded, and (for the one just
+  // expanded) how many related mains were dropped past the maxRelatedNodes cap.
+  exploring: boolean;
+  expanded: string[];
+  expandedCount: number;
+  truncatedRoot: number;
 }
 
 const accent =
@@ -46,6 +60,9 @@ const focusBarEl = $<HTMLSpanElement>("#focus-bar");
 const focusLabelEl = $<HTMLSpanElement>("#focus-label");
 const focusDepthEl = $<HTMLSelectElement>("#focus-depth");
 const focusClearEl = $<HTMLButtonElement>("#focus-clear");
+const exploreBarEl = $<HTMLSpanElement>("#explore-bar");
+const exploreCountEl = $<HTMLSpanElement>("#explore-count");
+const exploreResetEl = $<HTMLButtonElement>("#explore-reset");
 
 // ---- state ----
 let cy: Core | undefined;
@@ -58,6 +75,7 @@ let nodesByType = new Map<string, GraphNode[]>(); // type -> its nodes, for the 
 let selectedId: string | undefined;
 let settings: Settings = { physics: true, spacing: 150, animateOnHover: true, motionMaxNodes: 800 };
 let currentMeta: Meta | undefined;
+let expandedIds = new Set<string>(); // containers drilled into (mirrors host state)
 // Focus: when set, the map is narrowed to this node and its k-hop neighborhood.
 let focusId: string | undefined;
 let focusDepth = 1;
@@ -71,11 +89,27 @@ let driftT0 = 0;
 window.addEventListener("message", (event) => {
   const msg = event.data;
   if (msg?.type === "setGraph") {
-    if (msg.settings) settings = msg.settings as Settings;
-    currentMeta = (msg.meta as Meta | undefined) ?? undefined;
-    graph = msg.graph as Graph;
+    const m = msg as SetGraphMsg;
+    if (m.settings) settings = m.settings;
+    currentMeta = m.meta;
+    expandedIds = new Set(m.meta?.expanded ?? []);
+    graph = m.graph;
     build(graph);
     updateModeUI();
+    updateExploreUI();
+    // Keep the just-expanded node selected so its detail panel stays open (and its
+    // button flips to "Collapse"); flag any related nodes dropped past the cap.
+    if (m.expandRoot && byId.has(m.expandRoot)) {
+      select(m.expandRoot);
+      if (m.meta && m.meta.truncatedRoot > 0) {
+        detailEl.insertAdjacentHTML(
+          "beforeend",
+          `<p class="muted" style="margin-top:10px">+${m.meta.truncatedRoot} more related node${
+            m.meta.truncatedRoot === 1 ? "" : "s"
+          } hidden — raise “Max Related Nodes” in settings to widen each step.</p>`,
+        );
+      }
+    }
   } else if (msg?.type === "updateSettings") {
     applySettings(msg.settings as Settings);
   }
@@ -91,7 +125,9 @@ modeEl.addEventListener("click", () => {
 });
 
 function updateModeUI(): void {
-  if (!currentMeta || !currentMeta.hasNested) {
+  // While drilling in, the container/full toggle doesn't apply — the explore
+  // pill (with its reset) is the way out.
+  if (!currentMeta || !currentMeta.hasNested || currentMeta.exploring) {
     modeEl.hidden = true;
     return;
   }
@@ -359,7 +395,12 @@ function select(id: string): void {
     incident.addClass("hl");
     incident.connectedNodes().not(node).addClass("hl");
   });
-  if (graph) detailEl.innerHTML = renderDetail(graph, byId, id);
+  if (graph) {
+    detailEl.innerHTML = renderDetail(graph, byId, id, {
+      containerMode: currentMeta?.mode === "containers",
+      expanded: expandedIds,
+    });
+  }
 }
 
 function focusNode(id: string): void {
@@ -384,6 +425,15 @@ function clearDetail(): void {
 // related-node links (which recentre + select the clicked node).
 detailEl.addEventListener("click", (e) => {
   const target = e.target as HTMLElement;
+  // Expand / collapse a container: the host owns the data, so just ask it to
+  // re-render the drill-in with this node added to / removed from the set.
+  const expandBtn = target.closest(".d-expand") as HTMLElement | null;
+  if (expandBtn?.dataset.id) {
+    e.preventDefault();
+    const type = expandBtn.dataset.action === "collapse" ? "collapse" : "expand";
+    vscodeApi.postMessage({ type, id: expandBtn.dataset.id });
+    return;
+  }
   const focusBtn = target.closest(".d-focus") as HTMLElement | null;
   if (focusBtn?.dataset.id) {
     e.preventDefault();
@@ -811,6 +861,18 @@ focusDepthEl.addEventListener("change", () => {
 });
 focusClearEl.addEventListener("click", () => clearFocus());
 
+// ---- drill-in (expand containers) ----
+exploreResetEl.addEventListener("click", () => vscodeApi.postMessage({ type: "resetExploration" }));
+
+function updateExploreUI(): void {
+  const exploring = !!currentMeta?.exploring;
+  exploreBarEl.hidden = !exploring;
+  if (exploring) {
+    const n = currentMeta?.expandedCount ?? expandedIds.size;
+    exploreCountEl.textContent = `${n} expanded`;
+  }
+}
+
 // "all / none" quick toggles.
 document.querySelectorAll<HTMLElement>("[data-all]").forEach((el) => {
   el.addEventListener("click", () => {
@@ -896,7 +958,7 @@ function updateStatus(): void {
   let prefix = "";
   let suffix = "";
   if (currentMeta) {
-    prefix = currentMeta.mode === "containers" ? "containers · " : "full · ";
+    prefix = currentMeta.exploring ? "exploring · " : currentMeta.mode === "containers" ? "containers · " : "full · ";
     if (currentMeta.mode === "containers" && currentMeta.totalNodes > drawn) {
       suffix = ` (of ${fmt(currentMeta.totalNodes)})`;
     }
