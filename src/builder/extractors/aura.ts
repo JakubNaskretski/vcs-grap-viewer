@@ -18,7 +18,9 @@ const APEX_URI = /apex:\/\/([\w.]+)/g;
 
 function looksLikeObject(name: string): boolean {
   if (!name) return false;
-  if (name.toLowerCase().endsWith("__c")) return true;
+  // Any custom suffix, not just __c: managed-package __e/__mdt/__x/__b objects have
+  // a lowercase namespace prefix that fails the capitalization fallback below.
+  if (/__(c|e|mdt|x|b)$/i.test(name)) return true;
   return name[0] === name[0].toUpperCase() && name[0] !== name[0].toLowerCase();
 }
 

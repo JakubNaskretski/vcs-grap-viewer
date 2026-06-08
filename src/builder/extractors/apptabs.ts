@@ -55,7 +55,9 @@ class AppTabExtractor implements Extractor {
     const flexipage = text(root, "flexiPage");
 
     if (sobject) edges.push(rawEdge(tid, "references", "object", sobject));
-    else if (name.endsWith("__c")) edges.push(rawEdge(tid, "references", "object", name));
+    // tab name is the object API name — any custom suffix (incl. __x external-object
+    // tabs common in packaged orgs), not just __c.
+    else if (/__(c|e|mdt|x|b)$/i.test(name)) edges.push(rawEdge(tid, "references", "object", name));
     else if (lwc) edges.push(rawEdge(tid, "embeds", "lwc", lwc));
     else if (aura) edges.push(rawEdge(tid, "embeds", "lwc", aura));
     else if (flexipage) edges.push(rawEdge(tid, "page-for", "flexipage", flexipage));
