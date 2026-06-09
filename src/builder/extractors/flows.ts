@@ -24,12 +24,25 @@ function lwcName(raw: string): string | null {
   if (!raw) return null;
   let name = raw.trim();
   if (!name) return null;
-  if (name.includes(":")) name = name.slice(name.lastIndexOf(":") + 1);
-  else if (name.includes("__")) name = name.slice(name.lastIndexOf("__") + 2);
+  // Split off a `ns:` or `ns__` namespace prefix. The default-namespace marker `c`
+  // is dropped (local component, keyed lwc/<name>); a real managed-package namespace
+  // is preserved in API form (`ns:Foo` and `ns__Foo` both -> `ns__Foo`) so the edge
+  // targets the packaged component instead of colliding with a local one.
+  let ns = "";
+  if (name.includes(":")) {
+    const i = name.lastIndexOf(":");
+    ns = name.slice(0, i);
+    name = name.slice(i + 1);
+  } else if (name.includes("__")) {
+    const i = name.lastIndexOf("__");
+    ns = name.slice(0, i);
+    name = name.slice(i + 2);
+  }
   name = name.trim();
   if (!name || name.includes(" ") || name.includes(".")) return null;
-  return name;
+  return ns && ns !== "c" ? `${ns}__${name}` : name;
 }
+
 
 function triggerAttrs(start: Record<string, unknown> | null): [string | null, boolean] {
   if (!start) return [null, false];
