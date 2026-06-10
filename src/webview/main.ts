@@ -65,6 +65,15 @@ const focusClearEl = $<HTMLButtonElement>("#focus-clear");
 const exploreBarEl = $<HTMLSpanElement>("#explore-bar");
 const exploreCountEl = $<HTMLSpanElement>("#explore-count");
 const exploreResetEl = $<HTMLButtonElement>("#explore-reset");
+const layoutModeEl = $<HTMLButtonElement>("#layout-mode");
+
+// Overlay for grouped-mode island halos + type labels. Cytoscape has no native
+// group hulls, so we draw them as HTML over the canvas and keep them aligned with
+// the graph on every pan/zoom. Lives inside #cy (position:relative), so its
+// origin matches cytoscape's rendered (0,0).
+const groupOverlayEl = document.createElement("div");
+groupOverlayEl.id = "group-overlay";
+cyEl.appendChild(groupOverlayEl);
 
 // ---- state ----
 let cy: Core | undefined;
@@ -81,6 +90,21 @@ let expandedIds = new Set<string>(); // containers drilled into (mirrors host st
 // Focus: when set, the map is narrowed to this node and its k-hop neighborhood.
 let focusId: string | undefined;
 let focusDepth = 1;
+// Layout mode: "force" = force-directed (fcose); "grouped" = one island per node
+// type. Grouped trades intra-group connectivity for clean separation by color.
+type LayoutMode = "force" | "grouped";
+let layoutMode: LayoutMode = "force";
+// One per type in grouped mode: the island's centre, radius and color, used to
+// draw the overlay halo + label and keep them in sync with pan/zoom.
+interface Island {
+  type: string;
+  cx: number;
+  cy: number;
+  R: number;
+  color: string;
+  count: number;
+}
+let groupedIslands: Island[] = [];
 
 // ---- gentle-drift animation state ----
 let driftRAF: number | undefined;
@@ -202,6 +226,8 @@ function build(g: Graph): void {
   });
   cy.on("mouseover", "node", (evt) => onHover(evt.target as NodeSingular));
   cy.on("mouseout", "node", (evt) => offHover(evt.target as NodeSingular));
+  // Keep the grouped-mode halos/labels glued to the graph as it pans and zooms.
+  cy.on("pan zoom resize", positionGroupOverlay);
   // Dragging repositions a node; remember its new resting spot so it drifts there.
   cy.on("dragfree", "node", (evt) => {
     const n = evt.target as NodeSingular;
@@ -219,6 +245,13 @@ function build(g: Graph): void {
 function runLayout(): void {
   if (!cy) return;
   stopDrift();
+  if (layoutMode === "grouped") {
+    runGroupedLayout();
+    return;
+  }
+  // Leaving grouped mode: tear down the island overlay.
+  groupedIslands = [];
+  renderGroupOverlay();
   const layout = cy.layout(fcoseOptions(settings.spacing, cy.nodes().length, cy.edges().length));
   layout.one("layoutstop", () => {
     // Defer one frame so the container has its real size, then land zoomed-in
@@ -241,6 +274,145 @@ function runLayout(): void {
     });
   });
   layout.run();
+}
+
+// Grouped scatter: lay each node TYPE out as its own island, so the map reads as
+// separated, color-coded clusters instead of one stacked hairball. Within an
+// island the nodes spread on a phyllotaxis (sunflower) disc — even, gap-free,
+// deterministic, and O(n), so it stays cheap even on the full "Show all" graph.
+// Edge connectivity isn't honored inside an island (that's the trade for clean
+// separation), but cross-island edges still draw the inter-type relationships.
+function runGroupedLayout(): void {
+  if (!cy) return;
+  const all = cy.nodes();
+  if (all.empty()) return;
+
+  // Bucket nodes by type; largest islands first (then alphabetical) so the big
+  // ones anchor the shelf-packing and the arrangement is stable across runs.
+  const groups = new Map<string, NodeSingular[]>();
+  all.forEach((n) => {
+    const t = String(n.data("type"));
+    const list = groups.get(t);
+    if (list) list.push(n);
+    else groups.set(t, [n]);
+  });
+  const entries = [...groups.entries()].sort(
+    (a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]),
+  );
+
+  const gap = Math.max(140, settings.spacing * 1.6); // empty space between islands
+  const step = Math.max(34, settings.spacing * 0.35); // ~nearest-neighbor spacing within an island
+  const golden = Math.PI * (3 - Math.sqrt(5));
+
+  // Each island's disc radius grows with its node count (phyllotaxis: R ≈ step·√n).
+  const radii = entries.map(([, list]) => step * Math.sqrt(list.length) + step);
+  // Shelf-pack the discs into rows, wrapping at a target width chosen to keep the
+  // whole archipelago roughly square (√ of the summed cell areas).
+  const cellArea = radii.reduce((s, r) => s + (2 * r + gap) ** 2, 0);
+  const widest = Math.max(...radii) * 2 + gap;
+  // Aim a bit wider than square so islands of very different sizes pack into a
+  // landscape block (suits a wide editor viewport) rather than a tall column.
+  const targetRowWidth = Math.max(widest, Math.sqrt(cellArea) * 1.4);
+
+  const positions = new Map<string, { x: number; y: number }>();
+  const islands: Island[] = [];
+  let x = 0;
+  let y = 0;
+  let rowH = 0;
+  entries.forEach(([type, list], gi) => {
+    const R = radii[gi];
+    const d = 2 * R;
+    if (x > 0 && x + d > targetRowWidth) {
+      y += rowH + gap; // wrap to the next shelf
+      x = 0;
+      rowH = 0;
+    }
+    const cx = x + R;
+    const cyc = y + R;
+    // Hubs to the middle: place the most-connected nodes near the island centre
+    // (phyllotaxis index 0 is the centre), so each type's key nodes are easy to
+    // find and the long-tail leaves fan out around them.
+    const ordered = [...list].sort(
+      (m, n) => (Number(n.data("deg")) || 0) - (Number(m.data("deg")) || 0) || m.id().localeCompare(n.id()),
+    );
+    ordered.forEach((n, k) => {
+      const r = step * Math.sqrt(k + 0.5);
+      const a = k * golden;
+      positions.set(n.id(), { x: cx + r * Math.cos(a), y: cyc + r * Math.sin(a) });
+    });
+    islands.push({ type, cx, cy: cyc, R, color: typeColor(type), count: list.length });
+    x += d + gap;
+    rowH = Math.max(rowH, d);
+  });
+
+  cy.batch(() => {
+    cy!.nodes().forEach((n) => {
+      const p = positions.get(n.id());
+      if (p) n.position(p);
+    });
+  });
+  groupedIslands = islands;
+
+  requestAnimationFrame(() => {
+    if (!cy) return;
+    cy.resize();
+    // Frame the whole archipelago when it's small enough to draw at once; on a
+    // huge "Show all" map, land zoomed on the biggest hub like the force layout.
+    const visible = cy.nodes().filter((n) => n.style("display") !== "none");
+    if (visible.nonempty() && visible.length <= 3000) {
+      cy.fit(visible, 60);
+    } else {
+      cy.zoom(0.6);
+      if (cy.nodes().length > 0) cy.center(cy.nodes().max((dd) => Number(dd.data("deg")) || 0).ele);
+    }
+    renderGroupOverlay();
+    if (driftEligible()) startDrift();
+  });
+}
+
+// Rebuild the grouped-mode overlay DOM (one halo + label per island), then place
+// it. Empties the overlay whenever we're not in grouped mode.
+function renderGroupOverlay(): void {
+  groupOverlayEl.textContent = "";
+  if (layoutMode !== "grouped") return;
+  for (const is of groupedIslands) {
+    const halo = document.createElement("div");
+    halo.className = "group-halo";
+    halo.style.borderColor = is.color;
+    halo.style.background = `${is.color}14`; // ~8% alpha tint
+    const label = document.createElement("div");
+    label.className = "group-label";
+    label.textContent = `${is.type} · ${is.count.toLocaleString()}`;
+    label.style.color = is.color;
+    groupOverlayEl.append(halo, label);
+  }
+  positionGroupOverlay();
+}
+
+// Project each island's model-space centre/radius to rendered pixels and move its
+// halo + label there. Cheap (a handful of elements), so it runs on every pan/zoom.
+function positionGroupOverlay(): void {
+  if (!cy || layoutMode !== "grouped" || groupedIslands.length === 0) return;
+  const z = cy.zoom();
+  const pan = cy.pan();
+  const halos = groupOverlayEl.querySelectorAll<HTMLElement>(".group-halo");
+  const labels = groupOverlayEl.querySelectorAll<HTMLElement>(".group-label");
+  groupedIslands.forEach((is, i) => {
+    const rx = is.cx * z + pan.x;
+    const ry = is.cy * z + pan.y;
+    const px = 2 * is.R * z;
+    const halo = halos[i];
+    if (halo) {
+      halo.style.width = `${px}px`;
+      halo.style.height = `${px}px`;
+      halo.style.transform = `translate(${rx}px, ${ry}px) translate(-50%, -50%)`;
+    }
+    const label = labels[i];
+    if (label) {
+      label.style.fontSize = `${Math.max(12, Math.min(46, 0.085 * is.R * z))}px`;
+      label.style.transform = `translate(${rx}px, ${ry - is.R * z}px) translate(-50%, -120%)`;
+    }
+  });
 }
 
 // Gentle continuous drift: each node bobs a few px on its own slow sine wave
@@ -310,14 +482,20 @@ function fcoseOptions(spacing: number, nodes: number, edges: number): cytoscape.
     // between every neighboring node — but measuring every label is itself
     // expensive, so only on comfortably small maps.
     nodeDimensionsIncludeLabels: nodes <= 800 && edges <= 4000,
-    nodeRepulsion: 9000 + spacing * 60,
-    idealEdgeLength: spacing,
-    nodeSeparation: Math.max(60, spacing * 1.2),
+    // Spread harder. Strong center-gravity was what piled everything into one
+    // clump, so keep gravity weak and its range wide, push neighbors apart with
+    // high repulsion, and give every pair generous separation — even the dense
+    // capped slice then opens up instead of stacking.
+    gravity: 0.05,
+    gravityRange: 6.0,
+    nodeRepulsion: 20000 + spacing * 140,
+    idealEdgeLength: Math.round(spacing * 1.3),
+    nodeSeparation: Math.max(120, spacing * 1.6),
     packComponents: true,
-    // Disconnected nodes are tiled into a grid; pad that grid too.
+    // Disconnected nodes are tiled into a grid; pad that grid generously too.
     tile: true,
-    tilingPaddingVertical: Math.max(24, Math.round(spacing / 4)),
-    tilingPaddingHorizontal: Math.max(24, Math.round(spacing / 4)),
+    tilingPaddingVertical: Math.max(40, Math.round(spacing / 3)),
+    tilingPaddingHorizontal: Math.max(40, Math.round(spacing / 3)),
   } as unknown as cytoscape.LayoutOptions;
 }
 
@@ -984,6 +1162,21 @@ function applySearch(): void {
 }
 
 // ---- toolbar ----
+// Layout toggle: flip between force-directed and grouped-by-type, then re-lay out.
+layoutModeEl.addEventListener("click", () => {
+  layoutMode = layoutMode === "force" ? "grouped" : "force";
+  updateLayoutModeUI();
+  runLayout();
+});
+function updateLayoutModeUI(): void {
+  const grouped = layoutMode === "grouped";
+  layoutModeEl.textContent = grouped ? "Layout: Grouped" : "Layout: Force";
+  layoutModeEl.title = grouped
+    ? "Grouped by type (one island per node type). Click for force-directed."
+    : "Force-directed (connected nodes attract). Click to group by type.";
+  layoutModeEl.classList.toggle("active", grouped);
+}
+updateLayoutModeUI();
 $<HTMLButtonElement>("#relayout").addEventListener("click", () => runLayout());
 $<HTMLButtonElement>("#fit").addEventListener("click", () => cy?.fit(undefined, 30));
 $<HTMLButtonElement>("#toggle-filters").addEventListener("click", () => {

@@ -80,6 +80,21 @@ button:hover {
   background: var(--vscode-button-secondaryHoverBackground, var(--vscode-button-hoverBackground));
 }
 
+/* Layout toggle (force-directed <-> grouped by type). Stays a secondary button,
+   but lights up with the accent colors while the grouped layout is active. */
+.layout-btn {
+  white-space: nowrap;
+}
+
+.layout-btn.active {
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
+}
+
+.layout-btn.active:hover {
+  background: var(--vscode-button-hoverBackground);
+}
+
 /* View-mode toggle (container map <-> full graph) — the primary action when a
    large graph is collapsed, so it uses the accent button colors. */
 .mode-btn {
@@ -334,6 +349,35 @@ button:hover {
   position: relative;
   min-width: 0;
   background: var(--vscode-editor-background);
+}
+
+/* Grouped-mode island overlay (halos + type labels), drawn over the canvas and
+   kept in sync with pan/zoom from JS. Never eats pointer events. */
+#group-overlay {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 4;
+}
+
+#group-overlay .group-halo {
+  position: absolute;
+  left: 0;
+  top: 0;
+  border: 2px solid transparent;
+  border-radius: 50%;
+  opacity: 0.55;
+}
+
+#group-overlay .group-label {
+  position: absolute;
+  left: 0;
+  top: 0;
+  font-weight: 600;
+  white-space: nowrap;
+  letter-spacing: 0.02em;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.85), 0 0 2px rgba(0, 0, 0, 0.85);
 }
 
 /* Detail panel */

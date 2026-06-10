@@ -309,6 +309,7 @@ export class GraphPanel {
         <button id="explore-reset" title="Collapse everything and return to the overview">✕ reset</button>
       </span>
       <span class="spacer"></span>
+      <button id="layout-mode" class="layout-btn" title="Toggle layout: force-directed vs grouped by type">Layout: Force</button>
       <button id="relayout" title="Re-run layout">Re-layout</button>
       <button id="fit" title="Fit graph to view">Fit</button>
       <button id="toggle-filters" title="Show/hide filters">Filters</button>
