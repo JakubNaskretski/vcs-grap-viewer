@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.4
+
+### Group the map by type, and a roomier default layout
+
+- **New "Grouped" layout.** A **Layout** toggle in the toolbar switches between
+  the force-directed view and a grouped view that lays each node type out as its
+  own labelled, color-coded island. The most-connected nodes sit at each
+  island's centre, so a type's key nodes stand out; connections between types
+  are drawn as links between the islands.
+- **The force layout spreads out more.** Dense views no longer pile up in the
+  centre — nodes push apart for a more even, readable map. The **Spacing**
+  setting still scales both layouts.
+
 ## 0.5.3
 
 ### Fix: freeze on opening dense graphs
