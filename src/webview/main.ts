@@ -1,10 +1,13 @@
 import Graphology from "graphology";
 import Sigma from "sigma";
 import type { NodeDisplayData, EdgeDisplayData } from "sigma/types";
+import { drawDiscNodeLabel } from "sigma/rendering";
+import type { NodeHoverDrawingFunction } from "sigma/rendering";
 import forceAtlas2 from "graphology-layout-forceatlas2";
 import { Graph as GraphData, GraphNode } from "../graph/types";
 import { typeColor } from "../graph/labels";
 import { renderDetail } from "./render";
+import type { ExploreSpec, ExploreTotals } from "../graph/rollup";
 
 interface SetGraphMsg {
   type: "setGraph";
@@ -36,12 +39,12 @@ interface Meta {
   shownNodes: number;
   shownEdges: number;
   hasNested: boolean;
-  // Drill-in state: which containers are expanded, and (for the one just
-  // expanded) how many related mains were dropped past the maxRelatedNodes cap.
+  // Explore state: which nodes have reveals active, the count, and (for the node
+  // just acted on) what's available to reveal + its current reveal state.
   exploring: boolean;
   expanded: string[];
   expandedCount: number;
-  truncatedRoot: number;
+  rootInfo?: { id: string; totals: ExploreTotals; spec: ExploreSpec };
   // How many nodes the maxRenderNodes cap dropped from this view (0 = uncapped).
   capDropped: number;
 }
@@ -50,9 +53,13 @@ const accent =
   getComputedStyle(document.body).getPropertyValue("--vscode-focusBorder").trim() || "#4C8DFF";
 // Faded fills for dimmed nodes/edges — sigma has no per-node opacity, so we blend
 // the color toward the dark background instead.
-const NODE_DIM = "rgba(130,130,130,0.12)";
+// Dimmed (non-focused) colors must be DARK on the dark canvas so they recede.
+// Sigma's WebGL node program doesn't honor low alpha here — a translucent gray
+// rendered bright/near-white, washing the whole map out when one node was
+// hovered/selected. Solid dark greys give the intended "fade into the background".
+const NODE_DIM = "#3a3a3a";
 const EDGE_BASE = "#5a5a5a";
-const EDGE_DIM = "rgba(90,90,90,0.07)";
+const EDGE_DIM = "#262626";
 
 // ---- DOM handles ----
 const $ = <T extends HTMLElement>(sel: string) => document.querySelector(sel) as T;
@@ -63,10 +70,6 @@ const edgeFiltersEl = $<HTMLDivElement>("#edge-filters");
 const searchEl = $<HTMLInputElement>("#search");
 const statusEl = $<HTMLSpanElement>("#status");
 const modeEl = $<HTMLButtonElement>("#mode");
-const focusBarEl = $<HTMLSpanElement>("#focus-bar");
-const focusLabelEl = $<HTMLSpanElement>("#focus-label");
-const focusDepthEl = $<HTMLSelectElement>("#focus-depth");
-const focusClearEl = $<HTMLButtonElement>("#focus-clear");
 const exploreBarEl = $<HTMLSpanElement>("#explore-bar");
 const exploreCountEl = $<HTMLSpanElement>("#explore-count");
 const exploreResetEl = $<HTMLButtonElement>("#explore-reset");
@@ -92,10 +95,11 @@ let nodesByType = new Map<string, GraphNode[]>(); // type -> its nodes, for the 
 let selectedId: string | undefined;
 let settings: Settings = { physics: true, spacing: 220, animateOnHover: true, motionMaxNodes: 800 };
 let currentMeta: Meta | undefined;
-let expandedIds = new Set<string>(); // containers drilled into (mirrors host state)
-// Focus: when set, the map is narrowed to this node and its k-hop neighborhood.
-let focusId: string | undefined;
-let focusDepth = 1;
+// What's available to reveal around the selected node + its current reveal state,
+// from the host's `describe`/`rootInfo`. Drives the detail-panel Explore block.
+let selectedInfo: { id: string; totals: ExploreTotals; spec: ExploreSpec } | undefined;
+// How many nodes each Explore "＋" step reveals (and "−" hides).
+const EXPLORE_STEP = 8;
 
 // ---- per-frame render state (read by the reducers; mutate then refresh()) ----
 // Visibility is the single source of truth that used to be cytoscape's display
@@ -141,23 +145,22 @@ window.addEventListener("message", (event) => {
     const m = msg as SetGraphMsg;
     if (m.settings) settings = m.settings;
     currentMeta = m.meta;
-    expandedIds = new Set(m.meta?.expanded ?? []);
     graph = m.graph;
-    build(graph);
+    build(graph); // resets selectedInfo, so adopt the host's rootInfo AFTER it (below)
     updateModeUI();
     updateExploreUI();
-    // Keep the just-expanded node selected so its detail panel stays open (and its
-    // button flips to "Collapse"); flag any related nodes dropped past the cap.
+    // Keep the just-acted node selected so its detail (and Explore block) stays open;
+    // adopt the host's echoed reveal info so the block shows the new counts.
     if (m.expandRoot && byId.has(m.expandRoot)) {
+      if (m.meta?.rootInfo) selectedInfo = m.meta.rootInfo;
       select(m.expandRoot);
-      if (m.meta && m.meta.truncatedRoot > 0) {
-        detailEl.insertAdjacentHTML(
-          "beforeend",
-          `<p class="muted" style="margin-top:10px">+${m.meta.truncatedRoot} more related node${
-            m.meta.truncatedRoot === 1 ? "" : "s"
-          } hidden — raise “Max Related Nodes” in settings to widen each step.</p>`,
-        );
-      }
+    }
+  } else if (msg?.type === "nodeInfo") {
+    // Reply to `describe`: what's available to reveal around a selected node. Adopt
+    // it and re-render the detail panel so the Explore block shows live counts.
+    if (msg.id === selectedId) {
+      selectedInfo = { id: msg.id, totals: msg.totals, spec: msg.spec };
+      renderDetailForSelection();
     }
   } else if (msg?.type === "updateSettings") {
     applySettings(msg.settings as Settings);
@@ -198,10 +201,9 @@ function updateModeUI(): void {
 function build(g: GraphData): void {
   byId = new Map(g.nodes.map((n) => [n.id, n]));
   selectedId = undefined;
-  focusId = undefined;
+  selectedInfo = undefined;
   hoverId = hoverSet = selSet = selEdges = undefined;
   searchTerm = "";
-  updateFocusUI();
   clearDetail();
 
   const degree = new Map<string, number>();
@@ -259,6 +261,12 @@ function build(g: GraphData): void {
     labelDensity: 0.6,
     defaultNodeColor: "#888",
     defaultEdgeColor: EDGE_BASE,
+    // Readable hover/selection: dark label box instead of sigma's solid white one.
+    defaultDrawNodeHover: drawNodeHover,
+    // Gentler wheel zoom. Sigma steps by a fixed factor per wheel event regardless
+    // of scroll distance; the default 1.7 makes one notch a huge jump (and feels
+    // erratic on trackpads, where inertia flips direction). 1.2 is a calm step.
+    zoomingRatio: 1.2,
     zIndex: true,
     enableEdgeEvents: false,
     // Keep pan/zoom fast on big maps by dropping edges mid-gesture (replaces the
@@ -372,6 +380,49 @@ function edgeReducer(edge: string, data: Record<string, unknown>): Partial<EdgeD
   if (selEdges?.has(edge)) return { color: accent, size: 2, zIndex: 1 };
   return {};
 }
+
+// Custom hover/selection renderer. Sigma's default draws a SOLID WHITE label box,
+// which makes our light label text (#e6e6e6 on the dark canvas) unreadable. This
+// draws the same label-box geometry but in a dark, theme-matched fill with an accent
+// outline, then the normal light label on top — so a hovered/selected node stays
+// legible instead of washing out.
+const drawNodeHover: NodeHoverDrawingFunction = (context, data, settings) => {
+  const size = settings.labelSize;
+  context.font = `${settings.labelWeight} ${size}px ${settings.labelFont}`;
+  const PADDING = 3;
+  context.fillStyle = "rgba(20, 20, 20, 0.92)";
+  context.shadowOffsetX = 0;
+  context.shadowOffsetY = 0;
+  context.shadowBlur = 8;
+  context.shadowColor = "#000";
+  if (typeof data.label === "string" && data.label !== "") {
+    const textWidth = context.measureText(data.label).width;
+    const boxWidth = Math.round(textWidth + 7);
+    const boxHeight = Math.round(size + 2 * PADDING);
+    const radius = Math.max(data.size, size / 2) + PADDING;
+    const angle = Math.asin(boxHeight / 2 / radius);
+    const xDelta = Math.sqrt(Math.abs(radius ** 2 - (boxHeight / 2) ** 2));
+    context.beginPath();
+    context.moveTo(data.x + xDelta, data.y + boxHeight / 2);
+    context.lineTo(data.x + radius + boxWidth, data.y + boxHeight / 2);
+    context.lineTo(data.x + radius + boxWidth, data.y - boxHeight / 2);
+    context.lineTo(data.x + xDelta, data.y - boxHeight / 2);
+    context.arc(data.x, data.y, radius, angle, -angle);
+    context.closePath();
+    context.fill();
+    context.shadowBlur = 0;
+    context.lineWidth = 1;
+    context.strokeStyle = accent;
+    context.stroke();
+  } else {
+    context.beginPath();
+    context.arc(data.x, data.y, data.size + PADDING, 0, Math.PI * 2);
+    context.closePath();
+    context.fill();
+  }
+  context.shadowBlur = 0;
+  drawDiscNodeLabel(context, data, settings);
+};
 
 function refresh(): void {
   renderer?.refresh({ skipIndexation: true });
@@ -707,12 +758,24 @@ function select(id: string): void {
   selSet = new Set<string>([id, ...model.neighbors(id)]);
   selEdges = new Set<string>(model.edges(id));
   refresh();
-  if (graph) {
-    detailEl.innerHTML = renderDetail(graph, byId, id, {
-      containerMode: currentMeta?.mode === "containers",
-      expanded: expandedIds,
-    });
-  }
+  // Drop stale Explore info unless the host just sent it for this exact node.
+  if (selectedInfo?.id !== id) selectedInfo = undefined;
+  renderDetailForSelection();
+  // Ask the host what's available to reveal around this node (container view only).
+  if (currentMeta?.mode === "containers") vscodeApi.postMessage({ type: "describe", id });
+}
+
+// (Re)render the detail panel for the current selection, wiring the Explore block to
+// whatever reveal info the host has reported so far.
+function renderDetailForSelection(): void {
+  if (!graph || !selectedId) return;
+  detailEl.innerHTML = renderDetail(graph, byId, selectedId, {
+    containerMode: currentMeta?.mode === "containers",
+    explore:
+      selectedInfo && selectedInfo.id === selectedId
+        ? { totals: selectedInfo.totals, spec: selectedInfo.spec }
+        : undefined,
+  });
 }
 
 function focusNode(id: string): void {
@@ -725,6 +788,7 @@ function clearSelection(): void {
   selectedId = undefined;
   selSet = undefined;
   selEdges = undefined;
+  selectedInfo = undefined;
   refresh();
   clearDetail();
 }
@@ -733,23 +797,26 @@ function clearDetail(): void {
   detailEl.innerHTML = `<div class="placeholder">Select a node to see its details.</div>`;
 }
 
-// Detail-panel interactions (event delegation): "Focus on this node" button, and
-// related-node links (which recentre + select the clicked node).
+// Detail-panel interactions (event delegation): the Explore block (members toggle +
+// neighbour/source steppers) and related-node links (recentre + select).
 detailEl.addEventListener("click", (e) => {
   const target = e.target as HTMLElement;
-  // Expand / collapse a container: the host owns the data, so just ask it to
-  // re-render the drill-in with this node added to / removed from the set.
-  const expandBtn = target.closest(".d-expand") as HTMLElement | null;
-  if (expandBtn?.dataset.id) {
+  // Members toggle: reveal / collapse the selected node's children.
+  const toggle = target.closest(".x-toggle") as HTMLElement | null;
+  if (toggle?.dataset.kind && selectedId) {
     e.preventDefault();
-    const type = expandBtn.dataset.action === "collapse" ? "collapse" : "expand";
-    vscodeApi.postMessage({ type, id: expandBtn.dataset.id });
+    vscodeApi.postMessage({ type: "exploreStep", id: selectedId, kind: toggle.dataset.kind, value: toggle.dataset.val === "1" });
     return;
   }
-  const focusBtn = target.closest(".d-focus") as HTMLElement | null;
-  if (focusBtn?.dataset.id) {
+  // Neighbour / source stepper: reveal EXPLORE_STEP more (or fewer) around selection.
+  const step = target.closest(".x-step") as HTMLElement | null;
+  if (step?.dataset.kind && step.dataset.dir && selectedId && selectedInfo) {
     e.preventDefault();
-    focusOnNode(focusBtn.dataset.id);
+    const kind = step.dataset.kind as "neighbors" | "sources";
+    const total = selectedInfo.totals[kind];
+    const shown = Math.min(selectedInfo.spec[kind], total);
+    const next = Math.max(0, Math.min(total, shown + Number(step.dataset.dir) * EXPLORE_STEP));
+    if (next !== shown) vscodeApi.postMessage({ type: "exploreStep", id: selectedId, kind, value: next });
     return;
   }
   const link = target.closest(".node-link") as HTMLElement | null;
@@ -1068,114 +1135,24 @@ function filterRow(
 // repaint. Replaces cytoscape's per-element display flag.
 function applyFilters(): void {
   if (!renderer || !model) return;
-  const focusSet = focusVisibleIds(); // undefined = no focus restriction
   const next = new Set<string>();
   model.forEachNode((id, attr) => {
-    const show =
-      enabledNodeTypes.has(String(attr.type)) &&
-      !hiddenNodeIds.has(id) &&
-      (!focusSet || focusSet.has(id));
-    if (show) next.add(id);
+    if (enabledNodeTypes.has(String(attr.type)) && !hiddenNodeIds.has(id)) next.add(id);
   });
   visibleIds = next;
   refresh();
   updateStatus();
 }
 
-// ---- focus (isolate one node + its neighborhood) ----
-// The set of node ids reachable from the focused node within `focusDepth` hops,
-// traversing only type-enabled nodes/edges. Returns undefined when there's no focus
-// (or the focused node is itself hidden by a type filter) — i.e. no restriction.
-// Computed from the graph data, so it's independent of render state.
-function focusVisibleIds(): Set<string> | undefined {
-  if (!focusId || !graph) return undefined;
-  const nodeOk = (id: string): boolean => {
-    const n = byId.get(id);
-    return !!n && enabledNodeTypes.has(n.type) && !hiddenNodeIds.has(id);
-  };
-  if (!nodeOk(focusId)) return undefined;
-
-  const adj = new Map<string, string[]>();
-  const link = (a: string, b: string) => {
-    const list = adj.get(a);
-    if (list) list.push(b);
-    else adj.set(a, [b]);
-  };
-  for (const e of graph.edges) {
-    if (!enabledEdgeTypes.has(e.type) || !nodeOk(e.src) || !nodeOk(e.dst)) continue;
-    link(e.src, e.dst);
-    link(e.dst, e.src);
-  }
-
-  const seen = new Set<string>([focusId]);
-  let frontier = [focusId];
-  for (let hop = 0; hop < focusDepth; hop++) {
-    const next: string[] = [];
-    for (const id of frontier) {
-      for (const nb of adj.get(id) ?? []) {
-        if (!seen.has(nb)) {
-          seen.add(nb);
-          next.push(nb);
-        }
-      }
-    }
-    if (next.length === 0) break;
-    frontier = next;
-  }
-  return seen;
-}
-
-function focusOnNode(id: string): void {
-  if (!model || !model.hasNode(id)) return;
-  focusId = id;
-  applyFilters();
-  updateFocusUI();
-  select(id);
-  fitVisible(260);
-}
-
-function clearFocus(): void {
-  if (!focusId) return;
-  focusId = undefined;
-  applyFilters();
-  updateFocusUI();
-  fitVisible(220);
-}
-
-function fitVisible(duration: number): void {
-  if (visibleIds.size === 0) return;
-  fitToNodeIds([...visibleIds], { padding: 50, duration });
-}
-
-function updateFocusUI(): void {
-  if (!focusId) {
-    focusBarEl.hidden = true;
-    return;
-  }
-  focusBarEl.hidden = false;
-  const n = byId.get(focusId);
-  focusLabelEl.textContent = n ? n.label : focusId;
-  focusLabelEl.title = focusId;
-}
-
-focusDepthEl.addEventListener("change", () => {
-  focusDepth = Math.max(1, Number(focusDepthEl.value) || 1);
-  if (focusId) {
-    applyFilters();
-    fitVisible(220);
-  }
-});
-focusClearEl.addEventListener("click", () => clearFocus());
-
-// ---- drill-in (expand containers) ----
+// ---- explore (additive reveals; the toolbar chip just shows count + reset all) ----
 exploreResetEl.addEventListener("click", () => vscodeApi.postMessage({ type: "resetExploration" }));
 
 function updateExploreUI(): void {
   const exploring = !!currentMeta?.exploring;
   exploreBarEl.hidden = !exploring;
   if (exploring) {
-    const n = currentMeta?.expandedCount ?? expandedIds.size;
-    exploreCountEl.textContent = `${n} expanded`;
+    const n = currentMeta?.expandedCount ?? 0;
+    exploreCountEl.textContent = n === 1 ? "1 node revealed" : `${n} nodes revealed`;
   }
 }
 
@@ -1208,14 +1185,14 @@ function syncChecks(container: HTMLElement, checked: boolean): void {
 
 // ---- search ----
 searchEl.addEventListener("input", () => applySearch());
-// Enter focuses the best match: exact label wins, otherwise the first partial — the
-// quick path to "narrow to this one object/class and its connections".
+// Enter jumps to the best match: exact label wins, otherwise the first partial — the
+// quick path to "centre + select this one object/class".
 searchEl.addEventListener("keydown", (e) => {
   if (e.key !== "Enter") return;
   e.preventDefault();
   const id = bestSearchMatch();
   if (id) {
-    focusOnNode(id);
+    focusNode(id);
   } else if (searchEl.value.trim()) {
     // Not in the rendered slice — the host holds the full graph; ask it to find the
     // node and drill in to it (it answers with a new setGraph).

@@ -1,7 +1,8 @@
 import * as path from "path";
 import * as vscode from "vscode";
 import { Graph } from "./graph/types";
-import { containerId, exploreView, isNestedId, isNestedType, rollupToContainers, topConnectedSlice } from "./graph/rollup";
+import { containerId, expandedView, exploreTotals, isNestedId, isNestedType, rollupToContainers, topConnectedSlice } from "./graph/rollup";
+import type { ExploreSpec, ExploreTotals } from "./graph/rollup";
 import { GraphSource } from "./sources";
 
 const BIG_GRAPH = 2500; // above this many nodes, default to the container-level view
@@ -20,7 +21,9 @@ export class GraphPanel {
   private fullGraph: Graph | undefined;
   private rolledGraph: Graph | undefined; // cached container-level view
   private viewMode: "auto" | "containers" | "all" = "auto";
-  private expanded = new Set<string>(); // containers drilled into (container view only)
+  // Per-node additive "Explore" reveals (container view only): for each explored
+  // node, how much of its members / neighbours / sources to layer onto the overview.
+  private explore = new Map<string, ExploreSpec>();
   private webviewReady = false;
 
   static async createOrShow(context: vscode.ExtensionContext, source: GraphSource): Promise<void> {
@@ -67,10 +70,6 @@ export class GraphPanel {
         ) {
           this.postSettings();
         }
-        // The related-node cap changes the current drill-in, so re-render it.
-        if (e.affectsConfiguration("graphViewer.maxRelatedNodes") && this.expanded.size > 0) {
-          this.post();
-        }
       },
       null,
       this.disposables,
@@ -97,7 +96,7 @@ export class GraphPanel {
   async setSource(source: GraphSource): Promise<void> {
     this.source = source;
     this.viewMode = "auto"; // a new graph picks its own default (size-based)
-    this.expanded.clear();
+    this.explore.clear();
     this.panel.title = `Graph: ${source.label}`;
     this.setupWatcher(source);
     await this.reload();
@@ -109,7 +108,7 @@ export class GraphPanel {
     try {
       this.fullGraph = await this.source.load();
       this.rolledGraph = undefined;
-      this.expanded.clear(); // ids may have changed; start from the overview
+      this.explore.clear(); // ids may have changed; start from the overview
       this.post();
     } catch (err) {
       void vscode.window.showErrorMessage(`Graph Viewer: ${(err as Error).message}`);
@@ -133,24 +132,55 @@ export class GraphPanel {
     this.disposables.push(this.watcher);
   }
 
-  private onMessage(msg: { type?: string; mode?: "containers" | "all"; id?: string; query?: string }): void {
+  private onMessage(msg: {
+    type?: string;
+    mode?: "containers" | "all";
+    id?: string;
+    query?: string;
+    kind?: "members" | "neighbors" | "sources";
+    value?: unknown;
+  }): void {
     if (msg?.type === "ready") {
       this.webviewReady = true;
       this.post();
     } else if (msg?.type === "setViewMode") {
       void this.setViewMode(msg.mode);
-    } else if (msg?.type === "expand" && msg.id) {
-      this.expanded.add(msg.id);
-      this.post(msg.id);
-    } else if (msg?.type === "collapse" && msg.id) {
-      this.expanded.delete(msg.id);
-      this.post();
+    } else if (msg?.type === "describe" && msg.id) {
+      // The webview asks what's available to reveal around a node it just selected.
+      this.describe(msg.id);
+    } else if (msg?.type === "exploreStep" && msg.id && msg.kind) {
+      this.exploreStep(msg.id, msg.kind, msg.value);
     } else if (msg?.type === "resetExploration") {
-      this.expanded.clear();
+      this.explore.clear();
       this.post();
     } else if (msg?.type === "find" && msg.query) {
       this.findInFullGraph(msg.query);
     }
+  }
+
+  /** Tell the webview how much is available to reveal around `id` plus its current
+   *  reveal state, so the detail-panel Explore block can render its counts. */
+  private describe(id: string): void {
+    if (!this.fullGraph || !this.webviewReady) return;
+    void this.panel.webview.postMessage({
+      type: "nodeInfo",
+      id,
+      totals: exploreTotals(this.fullGraph, id),
+      spec: this.explore.get(id) ?? { members: false, neighbors: 0, sources: 0 },
+    });
+  }
+
+  /** Apply one Explore step (toggle members, or set a neighbour/source count) for a
+   *  node, then re-render. Dropping back to nothing removes the node from the set. */
+  private exploreStep(id: string, kind: "members" | "neighbors" | "sources", value: unknown): void {
+    const cur = this.explore.get(id) ?? { members: false, neighbors: 0, sources: 0 };
+    const next: ExploreSpec = { ...cur };
+    if (kind === "members") next.members = !!value;
+    else if (kind === "neighbors") next.neighbors = Math.max(0, Math.floor(Number(value) || 0));
+    else next.sources = Math.max(0, Math.floor(Number(value) || 0));
+    if (!next.members && next.neighbors === 0 && next.sources === 0) this.explore.delete(id);
+    else this.explore.set(id, next);
+    this.post(id);
   }
 
   /** Host-assisted search: the webview may only hold a capped slice, so when its
@@ -175,9 +205,12 @@ export class GraphPanel {
       void this.panel.webview.postMessage({ type: "findResult", found: false, query });
       return;
     }
-    // Drill in to the hit: expand its container (or itself, if it is a main node)
-    // and echo the hit id so the webview selects it.
-    this.expanded.add(isNestedId(hit) ? containerId(hit) : hit);
+    // Reveal the hit: expand the members of its container (or itself, if it's a main
+    // node) so a nested hit becomes visible, and echo the hit id so the webview
+    // selects it. Additive — the rest of the overview stays.
+    const root = isNestedId(hit) ? containerId(hit) : hit;
+    const cur = this.explore.get(root) ?? { members: false, neighbors: 0, sources: 0 };
+    this.explore.set(root, { ...cur, members: true });
     this.post(hit);
   }
 
@@ -196,50 +229,40 @@ export class GraphPanel {
       if (choice !== "Show all") return;
     }
     this.viewMode = mode;
-    this.expanded.clear(); // overview / full are their own thing; drop the drill-in
+    this.explore.clear(); // overview / full are their own thing; drop the drill-in
     this.post();
   }
 
-  private maxRelated(): number {
-    return Math.max(0, vscode.workspace.getConfiguration("graphViewer").get<number>("maxRelatedNodes", 10));
-  }
-
-  /** Push the current view to the webview. `expandRoot` (the container just
-   *  expanded) is echoed back so the webview can keep it selected and report any
-   *  related nodes dropped past the cap. */
+  /** Push the current view to the webview. `expandRoot` (the node just acted on) is
+   *  echoed back so the webview keeps it selected and refreshes its Explore counts. */
   private post(expandRoot?: string): void {
     if (!this.webviewReady || !this.fullGraph || !this.source) return;
     const total = this.fullGraph.nodes.length;
     const mode = this.viewMode === "auto" ? (total > BIG_GRAPH ? "containers" : "all") : this.viewMode;
-    const exploring = mode === "containers" && this.expanded.size > 0;
+    const exploring = mode === "containers" && this.explore.size > 0;
     let graph = this.fullGraph;
-    let truncatedRoot = 0;
-    if (mode === "containers") {
-      if (exploring) {
-        const res = exploreView(this.fullGraph, this.expanded, this.maxRelated());
-        graph = res.graph;
-        if (expandRoot) truncatedRoot = res.truncated.get(expandRoot) ?? 0;
-      } else {
-        this.rolledGraph ??= rollupToContainers(this.fullGraph);
-        graph = this.rolledGraph;
-      }
-    }
-    // Hard render cap on the container overview: it can be huge despite the
-    // rollup (graphs dominated by types that don't roll up — labels, custom
-    // metadata records, objects). Rendering tens of thousands of nodes crashes
-    // the webview, so the default landing view never exceeds the cap; drill-in
-    // is per-step bounded already, and "Show all" stays modal-confirmed.
     let capDropped = 0;
-    if (mode === "containers" && !exploring) {
+    let rootInfo: { id: string; totals: ExploreTotals; spec: ExploreSpec } | undefined;
+    if (mode === "containers") {
+      this.rolledGraph ??= rollupToContainers(this.fullGraph);
+      // Hard render cap on the overview: the rollup can still be huge (graphs
+      // dominated by types that don't roll up — labels, custom metadata, objects).
+      // The base never exceeds the cap; Explore reveals are layered on top of it,
+      // and "Show all" stays modal-confirmed. Edge budget rides the node cap.
       const cap = Math.max(
         100,
         vscode.workspace.getConfiguration("graphViewer").get<number>("maxRenderNodes", 1500),
       );
-      // Edge budget rides the node cap: the top-connected slice is the densest
-      // part of the graph, and edges (not nodes) are what freeze the layout.
-      const sliced = topConnectedSlice(graph, cap, cap * 4);
-      graph = sliced.graph;
+      const sliced = topConnectedSlice(this.rolledGraph, cap, cap * 4);
       capDropped = sliced.dropped;
+      graph = exploring ? expandedView(this.fullGraph, sliced.graph, this.explore) : sliced.graph;
+      if (exploring && expandRoot) {
+        rootInfo = {
+          id: expandRoot,
+          totals: exploreTotals(this.fullGraph, expandRoot),
+          spec: this.explore.get(expandRoot) ?? { members: false, neighbors: 0, sources: 0 },
+        };
+      }
     }
     void this.panel.webview.postMessage({
       type: "setGraph",
@@ -255,10 +278,10 @@ export class GraphPanel {
         shownEdges: graph.edges.length,
         hasNested: this.fullGraph.nodes.some((n) => isNestedType(n.type)),
         exploring,
-        expanded: [...this.expanded],
-        expandedCount: this.expanded.size,
-        truncatedRoot,
+        expanded: [...this.explore.keys()],
+        expandedCount: this.explore.size,
         capDropped,
+        rootInfo,
       },
     });
   }
@@ -291,22 +314,10 @@ export class GraphPanel {
       <input id="search" type="search" placeholder="Search nodes… (Enter to focus)" autocomplete="off" spellcheck="false" />
       <span id="status"></span>
       <button id="mode" class="mode-btn" hidden></button>
-      <span id="focus-bar" class="focus-bar" hidden>
-        <span class="focus-tag">focus</span>
-        <span id="focus-label" class="focus-label"></span>
-        <label class="focus-depth">depth
-          <select id="focus-depth">
-            <option value="1">1</option>
-            <option value="2">2</option>
-            <option value="3">3</option>
-          </select>
-        </label>
-        <button id="focus-clear" title="Show the whole graph again">✕ clear</button>
-      </span>
       <span id="explore-bar" class="focus-bar" hidden>
         <span class="focus-tag">exploring</span>
         <span id="explore-count" class="focus-label"></span>
-        <button id="explore-reset" title="Collapse everything and return to the overview">✕ reset</button>
+        <button id="explore-reset" title="Collapse all reveals and return to the overview">✕ reset</button>
       </span>
       <span class="spacer"></span>
       <button id="layout-mode" class="layout-btn" title="Toggle layout: force-directed vs grouped by type">Layout: Force</button>

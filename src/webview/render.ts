@@ -1,13 +1,15 @@
 import { Graph, GraphNode } from "../graph/types";
 import { edgeInLabel, edgeOutLabel, typeColor } from "../graph/labels";
+import type { ExploreSpec, ExploreTotals } from "../graph/rollup";
 
 const CORE_KEYS = new Set(["id", "type", "label", "external", "childCount"]);
 
 export interface DetailCtx {
-  /** Are we in the container view (where expanding a node makes sense)? */
+  /** Are we in the container view (where revealing makes sense)? */
   containerMode: boolean;
-  /** Containers currently drilled into. */
-  expanded: Set<string>;
+  /** What's available to reveal around this node and how much is revealed now (from
+   *  the host). Absent until the host answers the `describe` request. */
+  explore?: { totals: ExploreTotals; spec: ExploreSpec };
 }
 
 /** Build the detail-panel HTML for one node: header, attributes, relationships. */
@@ -28,28 +30,11 @@ export function renderDetail(graph: Graph, byId: Map<string, GraphNode>, id: str
   parts.push(`<div class="d-sub">${sub.join(" ")}</div>`);
   parts.push(`<div class="d-id" title="node id">${esc(node.id)}</div>`);
 
-  // Actions. In the container view a node with rolled-up members can be expanded
-  // in place (revealing its members + related nodes) or collapsed back; "Focus"
-  // narrows the map to the node and what it connects to.
-  const childCount = typeof node.childCount === "number" ? node.childCount : 0;
-  const canExpand = !!ctx?.containerMode && childCount > 0;
-  const actions: string[] = [];
-  if (canExpand) {
-    const word = childCount === 1 ? "member" : "members";
-    if (ctx!.expanded.has(node.id)) {
-      actions.push(
-        `<button class="d-expand" data-id="${esc(node.id)}" data-action="collapse" title="Roll this node's members back into it">⊖ Collapse members</button>`,
-      );
-    } else {
-      actions.push(
-        `<button class="d-expand" data-id="${esc(node.id)}" data-action="expand" title="Reveal this node's ${childCount} ${word} and the nodes they connect to">⊕ Expand ${childCount} ${word}</button>`,
-      );
-    }
-  }
-  actions.push(
-    `<button class="d-focus" data-id="${esc(node.id)}" title="Show only this node and its connections">◎ Focus on this node</button>`,
-  );
-  parts.push(`<div class="d-actions">${actions.join(" ")}</div>`);
+  // Explore: reveal more around this node — its members (children), its most-connected
+  // neighbours, and the nodes that point into it (sources). Additive: reveals layer
+  // onto the current map. Only in the container view, and only once the host has
+  // reported what's available (ctx.explore).
+  parts.push(renderExplore(ctx));
 
   // Attributes — everything beyond the core fields, generically rendered.
   const attrs: string[] = [];
@@ -83,6 +68,36 @@ export function renderDetail(graph: Graph, byId: Map<string, GraphNode>, id: str
   }
 
   return parts.join("");
+}
+
+// The "Explore" block: members toggle + neighbour/source steppers, each with a
+// revealed/total count. Buttons carry data-* the webview reads to post exploreStep.
+function renderExplore(ctx?: DetailCtx): string {
+  if (!ctx?.containerMode || !ctx.explore) return "";
+  const { totals, spec } = ctx.explore;
+  if (totals.members === 0 && totals.neighbors === 0 && totals.sources === 0) return "";
+  const rows: string[] = [];
+  if (totals.members > 0) {
+    const word = totals.members === 1 ? "member" : "members";
+    rows.push(
+      spec.members
+        ? `<div class="x-row"><span class="x-label">Members</span><button class="x-toggle on" data-kind="members" data-val="0" title="Roll these members back in">⊖ ${totals.members} ${word}</button></div>`
+        : `<div class="x-row"><span class="x-label">Members</span><button class="x-toggle" data-kind="members" data-val="1" title="Reveal this node's ${totals.members} ${word}">⊕ ${totals.members} ${word}</button></div>`,
+    );
+  }
+  if (totals.neighbors > 0) {
+    rows.push(stepper("Neighbors", "neighbors", Math.min(spec.neighbors, totals.neighbors), totals.neighbors));
+  }
+  if (totals.sources > 0) {
+    rows.push(stepper("Sources", "sources", Math.min(spec.sources, totals.sources), totals.sources));
+  }
+  return `<section class="d-section x-explore"><h3>Explore</h3>${rows.join("")}</section>`;
+}
+
+function stepper(label: string, kind: string, shown: number, total: number): string {
+  const minus = `<button class="x-step" data-kind="${kind}" data-dir="-1"${shown <= 0 ? " disabled" : ""} title="Show fewer">−</button>`;
+  const plus = `<button class="x-step" data-kind="${kind}" data-dir="1"${shown >= total ? " disabled" : ""} title="Show more">＋</button>`;
+  return `<div class="x-row"><span class="x-label">${esc(label)}</span><span class="x-stepper">${minus}<span class="x-count">${shown}/${total}</span>${plus}</span></div>`;
 }
 
 function addTo(map: Map<string, GraphNode[]>, type: string, node: GraphNode): void {

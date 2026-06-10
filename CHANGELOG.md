@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.6.1
+
+### Clearer selection, calmer zoom, and a node "Explore" panel
+
+- **Selecting or hovering a node is readable again.** The highlighted label now sits
+  on a dark, theme-matched chip (it used to wash out to white), and the rest of the
+  map dims into the background instead of brightening — so the focused node and its
+  connections stand out.
+- **Gentler mouse-wheel zoom.** Each scroll step is a smaller, calmer change instead
+  of a large jump.
+- **New "Explore" panel in a node's details.** Select a node and reveal more around it
+  a step at a time, with live counts: its **members** (children), its most-connected
+  **neighbours**, and the nodes that point into it (**sources**). Reveals are additive
+  — they layer onto the current map. This replaces the old depth dropdown and tidies
+  the toolbar.
+
 ## 0.6.0
 
 ### A new rendering engine for much larger graphs
