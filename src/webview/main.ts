@@ -1,18 +1,18 @@
-import cytoscape, { Core, ElementDefinition, NodeSingular } from "cytoscape";
-import fcose from "cytoscape-fcose";
-import { Graph, GraphNode } from "../graph/types";
+import Graphology from "graphology";
+import Sigma from "sigma";
+import type { NodeDisplayData, EdgeDisplayData } from "sigma/types";
+import forceAtlas2 from "graphology-layout-forceatlas2";
+import { Graph as GraphData, GraphNode } from "../graph/types";
 import { typeColor } from "../graph/labels";
 import { renderDetail } from "./render";
 
 interface SetGraphMsg {
   type: "setGraph";
-  graph: Graph;
+  graph: GraphData;
   settings?: Settings;
   meta?: Meta;
   expandRoot?: string;
 }
-
-cytoscape.use(fcose);
 
 interface VsCodeApi {
   postMessage(msg: unknown): void;
@@ -48,6 +48,11 @@ interface Meta {
 
 const accent =
   getComputedStyle(document.body).getPropertyValue("--vscode-focusBorder").trim() || "#4C8DFF";
+// Faded fills for dimmed nodes/edges — sigma has no per-node opacity, so we blend
+// the color toward the dark background instead.
+const NODE_DIM = "rgba(130,130,130,0.12)";
+const EDGE_BASE = "#5a5a5a";
+const EDGE_DIM = "rgba(90,90,90,0.07)";
 
 // ---- DOM handles ----
 const $ = <T extends HTMLElement>(sel: string) => document.querySelector(sel) as T;
@@ -67,17 +72,18 @@ const exploreCountEl = $<HTMLSpanElement>("#explore-count");
 const exploreResetEl = $<HTMLButtonElement>("#explore-reset");
 const layoutModeEl = $<HTMLButtonElement>("#layout-mode");
 
-// Overlay for grouped-mode island halos + type labels. Cytoscape has no native
-// group hulls, so we draw them as HTML over the canvas and keep them aligned with
-// the graph on every pan/zoom. Lives inside #cy (position:relative), so its
-// origin matches cytoscape's rendered (0,0).
+// Overlay for grouped-mode island halos + type labels. sigma has no native group
+// hulls, so we draw them as HTML over the canvas and keep them aligned with the
+// graph on every camera update. Lives inside #cy (position:relative), so its
+// origin matches sigma's rendered (0,0).
 const groupOverlayEl = document.createElement("div");
 groupOverlayEl.id = "group-overlay";
 cyEl.appendChild(groupOverlayEl);
 
 // ---- state ----
-let cy: Core | undefined;
-let graph: Graph | undefined;
+let renderer: Sigma | undefined; // the sigma WebGL renderer
+let model: Graphology | undefined; // the graphology graph model (nodes/edges + attrs)
+let graph: GraphData | undefined; // the host's data graph
 let byId = new Map<string, GraphNode>();
 const enabledNodeTypes = new Set<string>(); // node types currently shown
 const enabledEdgeTypes = new Set<string>();
@@ -90,12 +96,23 @@ let expandedIds = new Set<string>(); // containers drilled into (mirrors host st
 // Focus: when set, the map is narrowed to this node and its k-hop neighborhood.
 let focusId: string | undefined;
 let focusDepth = 1;
-// Layout mode: "force" = force-directed (fcose); "grouped" = one island per node
-// type. Grouped trades intra-group connectivity for clean separation by color.
+
+// ---- per-frame render state (read by the reducers; mutate then refresh()) ----
+// Visibility is the single source of truth that used to be cytoscape's display
+// flag: applyFilters() computes it, the node reducer + status/fit helpers read it.
+let visibleIds = new Set<string>();
+let hoverId: string | undefined;
+let hoverSet: Set<string> | undefined; // hovered node + its neighbors (enlarge/highlight)
+let selSet: Set<string> | undefined; // selected node + its neighbors (label-on)
+let selEdges: Set<string> | undefined; // edges incident to the selection (accent)
+let searchTerm = ""; // lowercased; non-matching nodes dim
+
+// Layout mode: "force" = force-directed (forceAtlas2); "grouped" = one island per
+// node type. Grouped trades intra-group connectivity for clean separation by color.
 type LayoutMode = "force" | "grouped";
 let layoutMode: LayoutMode = "force";
 // One per type in grouped mode: the island's centre, radius and color, used to
-// draw the overlay halo + label and keep them in sync with pan/zoom.
+// draw the overlay halo + label and keep them in sync with the camera.
 interface Island {
   type: string;
   cx: number;
@@ -106,11 +123,17 @@ interface Island {
 }
 let groupedIslands: Island[] = [];
 
+// Node sizing: base radius mapped from degree, like the old mapData(deg,0,maxDeg,14,52).
+const SIZE_MIN = 4;
+const SIZE_MAX = 20;
+const HOVER_SCALE = 1.6;
+
 // ---- gentle-drift animation state ----
 let driftRAF: number | undefined;
 const driftHomes = new Map<string, { x: number; y: number }>();
 const driftParams = new Map<string, { ax: number; ay: number; fx: number; fy: number; px: number; py: number }>();
 let driftT0 = 0;
+let draggedNode: string | undefined; // node under an active drag (don't drift it)
 
 window.addEventListener("message", (event) => {
   const msg = event.data;
@@ -172,10 +195,12 @@ function updateModeUI(): void {
 }
 
 // ---- build ----
-function build(g: Graph): void {
+function build(g: GraphData): void {
   byId = new Map(g.nodes.map((n) => [n.id, n]));
   selectedId = undefined;
   focusId = undefined;
+  hoverId = hoverSet = selSet = selEdges = undefined;
+  searchTerm = "";
   updateFocusUI();
   clearDetail();
 
@@ -187,53 +212,98 @@ function build(g: Graph): void {
   let maxDeg = 1;
   for (const d of degree.values()) maxDeg = Math.max(maxDeg, d);
 
-  const elements: ElementDefinition[] = [];
-  for (const n of g.nodes) {
-    elements.push({
-      data: {
-        id: n.id,
-        label: n.label,
-        type: n.type,
-        color: typeColor(n.type),
-        deg: degree.get(n.id) ?? 0,
-        external: n.external ? 1 : 0,
-      },
+  // Build the graphology model. Multi/self-loops mirror what cytoscape tolerated.
+  const m = new Graphology({ type: "directed", multi: true, allowSelfLoops: true });
+  const N = g.nodes.length;
+  g.nodes.forEach((n, i) => {
+    if (m.hasNode(n.id)) return; // ignore accidental duplicate ids (cytoscape errored)
+    const deg = degree.get(n.id) ?? 0;
+    const size = SIZE_MIN + (maxDeg > 0 ? (deg / maxDeg) * (SIZE_MAX - SIZE_MIN) : 0);
+    const base = typeColor(n.type);
+    // Seed positions on a circle so forceAtlas2 has something to push apart (it
+    // can't separate coincident nodes) and nothing renders stacked at (0,0).
+    const a = (2 * Math.PI * i) / Math.max(1, N);
+    m.addNode(n.id, {
+      x: Math.cos(a),
+      y: Math.sin(a),
+      size,
+      baseSize: size,
+      label: n.label,
+      type: n.type,
+      deg,
+      color: n.external ? hexToRgba(base, 0.55) : base,
+      external: n.external ? 1 : 0,
     });
-  }
+  });
   g.edges.forEach((e, i) => {
-    elements.push({ data: { id: `e${i}`, source: e.src, target: e.dst, type: e.type } });
+    // Skip dangling edges (endpoint not present) — applyFilters would hide them
+    // anyway, and addEdge would throw.
+    if (!m.hasNode(e.src) || !m.hasNode(e.dst)) return;
+    m.addEdgeWithKey(`e${i}`, e.src, e.dst, { type: e.type });
   });
 
   // Edges, not nodes, are what make rendering heavy — the capped view is the
   // densest slice of the graph, so both counts gate the cheap-render paths.
   const bigRender = g.nodes.length > 1500 || g.edges.length > 8000;
+
   stopDrift();
-  cy?.destroy();
-  cy = cytoscape({
-    container: cyEl,
-    elements,
-    wheelSensitivity: 0.2,
-    // Texture rendering keeps pan/zoom fast but blurs text mid-gesture — only
-    // worth it past the render cap (the confirmed "Show all" path).
-    textureOnViewport: bigRender,
-    hideEdgesOnViewport: bigRender, // don't redraw every edge mid pan/zoom
-    style: buildStyle(maxDeg, bigRender),
+  renderer?.kill();
+  model = m;
+  renderer = new Sigma(m, cyEl, {
+    renderLabels: true,
+    // Labels are culled below a readable on-screen size — zoomed out you see
+    // shapes/colors, text appears as you zoom in. Bigger threshold = fewer labels
+    // on dense maps. Hover/selection force their label on regardless (reducers).
+    labelRenderedSizeThreshold: bigRender ? 14 : 9,
+    labelColor: { color: "#e6e6e6" },
+    labelDensity: 0.6,
+    defaultNodeColor: "#888",
+    defaultEdgeColor: EDGE_BASE,
+    zIndex: true,
+    enableEdgeEvents: false,
+    // Keep pan/zoom fast on big maps by dropping edges mid-gesture (replaces the
+    // old hideEdgesOnViewport / texture-on-viewport tricks).
+    hideEdgesOnMove: bigRender,
+    allowInvalidContainer: true, // headless harness has a zero-size container at first
+    nodeReducer,
+    edgeReducer,
   });
 
-  cy.on("tap", "node", (evt) => select((evt.target as NodeSingular).id()));
-  cy.on("tap", (evt) => {
-    if (evt.target === cy) clearSelection();
+  // Dev-only global handles for the headless harness (see dev/). esbuild folds the
+  // condition to `false` in production builds and dead-code-eliminates the block.
+  if (process.env.NODE_ENV !== "production") {
+    (window as unknown as Record<string, unknown>).__sigma = renderer;
+    (window as unknown as Record<string, unknown>).__graph = m;
+    (window as unknown as Record<string, unknown>).__fit = fitToNodeIds;
+  }
+
+  // ---- events ----
+  renderer.on("clickNode", ({ node }) => select(node));
+  renderer.on("clickStage", () => clearSelection());
+  renderer.on("enterNode", ({ node }) => onHover(node));
+  renderer.on("leaveNode", () => offHover());
+  // Drag a node to reposition it; remember its new resting spot so it drifts there.
+  renderer.on("downNode", ({ node }) => {
+    draggedNode = node;
   });
-  cy.on("mouseover", "node", (evt) => onHover(evt.target as NodeSingular));
-  cy.on("mouseout", "node", (evt) => offHover(evt.target as NodeSingular));
-  // Keep the grouped-mode halos/labels glued to the graph as it pans and zooms.
-  cy.on("pan zoom resize", positionGroupOverlay);
-  // Dragging repositions a node; remember its new resting spot so it drifts there.
-  cy.on("dragfree", "node", (evt) => {
-    const n = evt.target as NodeSingular;
-    const p = n.position();
-    driftHomes.set(n.id(), { x: p.x, y: p.y });
+  renderer.getMouseCaptor().on("mousemovebody", (e) => {
+    if (!draggedNode || !renderer || !model) return;
+    const p = renderer.viewportToGraph(e);
+    model.setNodeAttribute(draggedNode, "x", p.x);
+    model.setNodeAttribute(draggedNode, "y", p.y);
+    driftHomes.set(draggedNode, { x: p.x, y: p.y });
+    // Stop the camera from panning while we drag a node.
+    e.preventSigmaDefault();
+    e.original.preventDefault();
+    e.original.stopPropagation();
   });
+  const endDrag = () => {
+    draggedNode = undefined;
+  };
+  renderer.getMouseCaptor().on("mouseup", endDrag);
+  // Keep the grouped-mode halos/labels glued to the graph as the camera moves.
+  renderer.getCamera().on("updated", positionGroupOverlay);
+  renderer.on("resize", positionGroupOverlay);
 
   buildFilters(g);
   applyFilters();
@@ -241,9 +311,75 @@ function build(g: Graph): void {
   updateStatus();
 }
 
+// ---- reducers: per-frame appearance, computed from the render state above ----
+// Sigma REPLACES a node's render data with whatever this returns (it does not merge
+// onto the graph attributes), so we mutate the per-frame `data` copy in place — it
+// already carries x/y/size/color/label — and override on top. Returning a bare
+// partial would drop x/y and Sigma throws "could not find a valid position". We also
+// clear `type`: the model keeps it for grouping/filtering, but Sigma reads a node's
+// `type` as its render *program* name and we register none, so every node must fall
+// back to the default circle program (else "could not find a suitable program").
+function nodeReducer(node: string, data: Record<string, unknown>): Partial<NodeDisplayData> {
+  const res = data as Partial<NodeDisplayData> & { type?: unknown };
+  res.type = undefined;
+  if (!visibleIds.has(node)) {
+    res.hidden = true;
+    return res;
+  }
+  const baseSize = (data.baseSize as number) ?? (data.size as number) ?? SIZE_MIN;
+  if (hoverSet) {
+    // Hover: enlarge + label the node and its neighbors; dim everything else.
+    if (hoverSet.has(node)) {
+      res.highlighted = true;
+      res.forceLabel = true;
+      res.size = baseSize * HOVER_SCALE;
+      res.zIndex = 2;
+    } else {
+      res.color = NODE_DIM;
+      res.label = "";
+      res.zIndex = 0;
+    }
+    return res;
+  }
+  if (selectedId) {
+    if (node === selectedId) {
+      res.highlighted = true;
+      res.forceLabel = true;
+      res.zIndex = 2;
+    } else if (selSet?.has(node)) {
+      res.forceLabel = true;
+      res.zIndex = 1;
+    }
+  }
+  // Search dims non-matches (independent of selection).
+  if (searchTerm && !String(data.label ?? "").toLowerCase().includes(searchTerm)) {
+    res.color = NODE_DIM;
+    res.label = "";
+  }
+  return res;
+}
+
+function edgeReducer(edge: string, data: Record<string, unknown>): Partial<EdgeDisplayData> {
+  if (!model) return { hidden: true };
+  if (!enabledEdgeTypes.has(data.type as string)) return { hidden: true };
+  const s = model.source(edge);
+  const t = model.target(edge);
+  if (!visibleIds.has(s) || !visibleIds.has(t)) return { hidden: true };
+  if (hoverSet) {
+    if (hoverSet.has(s) && hoverSet.has(t)) return { color: accent, size: 2, zIndex: 2 };
+    return { color: EDGE_DIM, zIndex: 0 };
+  }
+  if (selEdges?.has(edge)) return { color: accent, size: 2, zIndex: 1 };
+  return {};
+}
+
+function refresh(): void {
+  renderer?.refresh({ skipIndexation: true });
+}
+
 // ---- layout & motion ----
 function runLayout(): void {
-  if (!cy) return;
+  if (!renderer || !model) return;
   stopDrift();
   if (layoutMode === "grouped") {
     runGroupedLayout();
@@ -252,49 +388,64 @@ function runLayout(): void {
   // Leaving grouped mode: tear down the island overlay.
   groupedIslands = [];
   renderGroupOverlay();
-  const layout = cy.layout(fcoseOptions(settings.spacing, cy.nodes().length, cy.edges().length));
-  layout.one("layoutstop", () => {
-    // Defer one frame so the container has its real size, then land zoomed-in
-    // centered on the most-connected node (the natural focal point, and the
-    // biggest one since nodes are sized by degree). Absolute zoom — no reliance
-    // on reading container pixels (that was the bug).
-    requestAnimationFrame(() => {
-      if (!cy) return;
-      cy.resize();
-      // Land zoomed-in, centered on the selected node (e.g. a search hit the host
-      // just drilled in to) or else the most-connected (and largest) node — at
-      // every size. The host caps how much is rendered, so fitting "everything"
-      // (the old big-map behavior) is never the right landing: it draws the whole
-      // sea of nodes at once. The Fit button still does a full fit on demand.
-      cy.zoom(1.5);
-      const sel = selectedId ? cy.getElementById(selectedId) : undefined;
-      if (sel && sel.nonempty()) cy.center(sel);
-      else if (cy.nodes().length > 0) cy.center(cy.nodes().max((d) => Number(d.data("deg")) || 0).ele);
-      if (driftEligible()) startDrift();
-    });
+  runForceLayout();
+  // Land zoomed-in, centered on the selected node (e.g. a search hit the host just
+  // drilled in to) or else the most-connected (and largest) node. The host caps how
+  // much is rendered, so fitting "everything" is never the right landing.
+  const focal = selectedId && model.hasNode(selectedId) ? selectedId : maxDegreeNode();
+  if (focal) centerOn(focal, { ratio: 0.4 });
+  if (driftEligible()) startDrift();
+}
+
+// Force layout via forceAtlas2 (synchronous, on the main thread). The default view
+// is render-capped (graphViewer.maxRenderNodes = 1500), where this is ~0.4s. Only
+// the opt-in "Show all" path feeds tens of thousands of nodes; there FA2 is steered
+// down to a few iterations to bound the main-thread block (grouped mode, which is
+// O(n) and instant, is the recommended layout for big graphs). A web-worker FA2
+// supervisor — the real fix for async big-graph force — is future work (needs a CSP
+// `worker-src blob:` allowance; see the migration plan).
+function runForceLayout(): void {
+  if (!model) return;
+  const nodes = model.order;
+  const edges = model.size;
+  const iterations =
+    nodes <= 200 ? 400 : nodes <= 2000 ? 120 : edges > 6000 || nodes > 6000 ? (nodes > 15000 ? 12 : 30) : 60;
+  const spacing = settings.spacing;
+  forceAtlas2.assign(model, {
+    iterations,
+    settings: {
+      // Spread harder: weak gravity so things don't pile into one clump, high
+      // repulsion (scalingRatio) to push neighbors apart, Barnes-Hut to stay cheap
+      // on big/dense slices. Maps the old fcose spread knobs onto FA2.
+      gravity: 0.4,
+      scalingRatio: 8 + spacing / 18,
+      slowDown: 1 + nodes / 5000,
+      barnesHutOptimize: nodes > 1000,
+      barnesHutTheta: 0.6,
+      edgeWeightInfluence: 0,
+    },
   });
-  layout.run();
+  refreshIndexed();
 }
 
 // Grouped scatter: lay each node TYPE out as its own island, so the map reads as
-// separated, color-coded clusters instead of one stacked hairball. Within an
-// island the nodes spread on a phyllotaxis (sunflower) disc — even, gap-free,
-// deterministic, and O(n), so it stays cheap even on the full "Show all" graph.
-// Edge connectivity isn't honored inside an island (that's the trade for clean
-// separation), but cross-island edges still draw the inter-type relationships.
+// separated, color-coded clusters instead of one stacked hairball. Within an island
+// the nodes spread on a phyllotaxis (sunflower) disc — even, gap-free, deterministic,
+// and O(n), so it stays cheap even on the full "Show all" graph. Edge connectivity
+// isn't honored inside an island (that's the trade for clean separation), but
+// cross-island edges still draw the inter-type relationships.
 function runGroupedLayout(): void {
-  if (!cy) return;
-  const all = cy.nodes();
-  if (all.empty()) return;
+  if (!model) return;
+  if (model.order === 0) return;
 
-  // Bucket nodes by type; largest islands first (then alphabetical) so the big
-  // ones anchor the shelf-packing and the arrangement is stable across runs.
-  const groups = new Map<string, NodeSingular[]>();
-  all.forEach((n) => {
-    const t = String(n.data("type"));
+  // Bucket nodes by type; largest islands first (then alphabetical) so the big ones
+  // anchor the shelf-packing and the arrangement is stable across runs.
+  const groups = new Map<string, string[]>();
+  model.forEachNode((id, attr) => {
+    const t = String(attr.type);
     const list = groups.get(t);
-    if (list) list.push(n);
-    else groups.set(t, [n]);
+    if (list) list.push(id);
+    else groups.set(t, [id]);
   });
   const entries = [...groups.entries()].sort(
     (a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]),
@@ -330,48 +481,47 @@ function runGroupedLayout(): void {
     const cx = x + R;
     const cyc = y + R;
     // Hubs to the middle: place the most-connected nodes near the island centre
-    // (phyllotaxis index 0 is the centre), so each type's key nodes are easy to
-    // find and the long-tail leaves fan out around them.
+    // (phyllotaxis index 0 is the centre), so each type's key nodes are easy to find
+    // and the long-tail leaves fan out around them.
     const ordered = [...list].sort(
-      (m, n) => (Number(n.data("deg")) || 0) - (Number(m.data("deg")) || 0) || m.id().localeCompare(n.id()),
+      (mId, nId) =>
+        (Number(model!.getNodeAttribute(nId, "deg")) || 0) -
+          (Number(model!.getNodeAttribute(mId, "deg")) || 0) || mId.localeCompare(nId),
     );
-    ordered.forEach((n, k) => {
+    ordered.forEach((id, k) => {
       const r = step * Math.sqrt(k + 0.5);
       const a = k * golden;
-      positions.set(n.id(), { x: cx + r * Math.cos(a), y: cyc + r * Math.sin(a) });
+      positions.set(id, { x: cx + r * Math.cos(a), y: cyc + r * Math.sin(a) });
     });
     islands.push({ type, cx, cy: cyc, R, color: typeColor(type), count: list.length });
     x += d + gap;
     rowH = Math.max(rowH, d);
   });
 
-  cy.batch(() => {
-    cy!.nodes().forEach((n) => {
-      const p = positions.get(n.id());
-      if (p) n.position(p);
-    });
+  model.forEachNode((id) => {
+    const p = positions.get(id);
+    if (p) {
+      model!.setNodeAttribute(id, "x", p.x);
+      model!.setNodeAttribute(id, "y", p.y);
+    }
   });
   groupedIslands = islands;
+  refreshIndexed();
 
-  requestAnimationFrame(() => {
-    if (!cy) return;
-    cy.resize();
-    // Frame the whole archipelago when it's small enough to draw at once; on a
-    // huge "Show all" map, land zoomed on the biggest hub like the force layout.
-    const visible = cy.nodes().filter((n) => n.style("display") !== "none");
-    if (visible.nonempty() && visible.length <= 3000) {
-      cy.fit(visible, 60);
-    } else {
-      cy.zoom(0.6);
-      if (cy.nodes().length > 0) cy.center(cy.nodes().max((dd) => Number(dd.data("deg")) || 0).ele);
-    }
-    renderGroupOverlay();
-    if (driftEligible()) startDrift();
-  });
+  // Frame the whole archipelago when it's small enough to draw at once; on a huge
+  // "Show all" map, land zoomed on the biggest hub like the force layout.
+  if (visibleIds.size > 0 && visibleIds.size <= 3000) {
+    fitToNodeIds([...visibleIds], { padding: 80, duration: 0 });
+  } else {
+    const focal = maxDegreeNode();
+    if (focal) centerOn(focal, { ratio: 0.6 });
+  }
+  renderGroupOverlay();
+  if (driftEligible()) startDrift();
 }
 
-// Rebuild the grouped-mode overlay DOM (one halo + label per island), then place
-// it. Empties the overlay whenever we're not in grouped mode.
+// Rebuild the grouped-mode overlay DOM (one halo + label per island), then place it.
+// Empties the overlay whenever we're not in grouped mode.
 function renderGroupOverlay(): void {
   groupOverlayEl.textContent = "";
   if (layoutMode !== "grouped") return;
@@ -390,47 +540,119 @@ function renderGroupOverlay(): void {
 }
 
 // Project each island's model-space centre/radius to rendered pixels and move its
-// halo + label there. Cheap (a handful of elements), so it runs on every pan/zoom.
+// halo + label there. Cheap (a handful of elements), so it runs on every camera move.
 function positionGroupOverlay(): void {
-  if (!cy || layoutMode !== "grouped" || groupedIslands.length === 0) return;
-  const z = cy.zoom();
-  const pan = cy.pan();
+  if (!renderer || layoutMode !== "grouped" || groupedIslands.length === 0) return;
   const halos = groupOverlayEl.querySelectorAll<HTMLElement>(".group-halo");
   const labels = groupOverlayEl.querySelectorAll<HTMLElement>(".group-label");
   groupedIslands.forEach((is, i) => {
-    const rx = is.cx * z + pan.x;
-    const ry = is.cy * z + pan.y;
-    const px = 2 * is.R * z;
+    const centre = renderer!.graphToViewport({ x: is.cx, y: is.cy });
+    const edge = renderer!.graphToViewport({ x: is.cx + is.R, y: is.cy });
+    const rPx = Math.hypot(edge.x - centre.x, edge.y - centre.y);
     const halo = halos[i];
     if (halo) {
-      halo.style.width = `${px}px`;
-      halo.style.height = `${px}px`;
-      halo.style.transform = `translate(${rx}px, ${ry}px) translate(-50%, -50%)`;
+      halo.style.width = `${2 * rPx}px`;
+      halo.style.height = `${2 * rPx}px`;
+      halo.style.transform = `translate(${centre.x}px, ${centre.y}px) translate(-50%, -50%)`;
     }
     const label = labels[i];
     if (label) {
-      label.style.fontSize = `${Math.max(12, Math.min(46, 0.085 * is.R * z))}px`;
-      label.style.transform = `translate(${rx}px, ${ry - is.R * z}px) translate(-50%, -120%)`;
+      label.style.fontSize = `${Math.max(12, Math.min(46, 0.17 * rPx))}px`;
+      label.style.transform = `translate(${centre.x}px, ${centre.y - rPx}px) translate(-50%, -120%)`;
     }
   });
 }
 
-// Gentle continuous drift: each node bobs a few px on its own slow sine wave
-// around its resting spot (stable — always returns home; cheap math). The hovered
-// node + neighbors bob bigger. Auto-disabled above `motionMaxNodes`.
+// ---- camera helpers (sigma has no cy.fit(eles)) ----
+// Centre the camera on one node, optionally setting an absolute zoom (sigma ratio:
+// smaller = closer). Used for landings and detail-panel "focus on this node".
+function centerOn(id: string, opts: { ratio?: number; duration?: number } = {}): void {
+  if (!renderer) return;
+  const d = renderer.getNodeDisplayData(id);
+  if (!d) return;
+  const cam = renderer.getCamera();
+  const state: { x: number; y: number; ratio?: number } = { x: d.x, y: d.y };
+  if (opts.ratio !== undefined) state.ratio = opts.ratio;
+  cam.animate(state, { duration: opts.duration ?? 300 });
+}
+
+// Fit the camera to a set of nodes with padding. Derives the zoom from the nodes'
+// current pixel bbox (exact for the live camera) and recentres on their framed-graph
+// centroid (camera x/y live in that normalized space).
+function fitToNodeIds(ids: string[], opts: { padding?: number; duration?: number } = {}): void {
+  if (!renderer || !model || ids.length === 0) return;
+  const cam = renderer.getCamera();
+  const { width, height } = renderer.getDimensions();
+  const pad = opts.padding ?? 60;
+  let minVX = Infinity;
+  let maxVX = -Infinity;
+  let minVY = Infinity;
+  let maxVY = -Infinity;
+  let minFX = Infinity;
+  let maxFX = -Infinity;
+  let minFY = Infinity;
+  let maxFY = -Infinity;
+  let any = false;
+  for (const id of ids) {
+    const d = renderer.getNodeDisplayData(id);
+    if (!d) continue;
+    any = true;
+    const v = renderer.graphToViewport({ x: model.getNodeAttribute(id, "x"), y: model.getNodeAttribute(id, "y") });
+    minVX = Math.min(minVX, v.x);
+    maxVX = Math.max(maxVX, v.x);
+    minVY = Math.min(minVY, v.y);
+    maxVY = Math.max(maxVY, v.y);
+    minFX = Math.min(minFX, d.x);
+    maxFX = Math.max(maxFX, d.x);
+    minFY = Math.min(minFY, d.y);
+    maxFY = Math.max(maxFY, d.y);
+  }
+  if (!any) return;
+  const bw = Math.max(maxVX - minVX, 1);
+  const bh = Math.max(maxVY - minVY, 1);
+  const scale = Math.min((width - 2 * pad) / bw, (height - 2 * pad) / bh);
+  // Don't zoom in past a sane limit when fitting a tiny set (e.g. one node).
+  const ratio = Math.max(cam.ratio / scale, 0.08);
+  cam.animate(
+    { x: (minFX + maxFX) / 2, y: (minFY + maxFY) / 2, ratio },
+    { duration: opts.duration ?? 300 },
+  );
+}
+
+function maxDegreeNode(): string | undefined {
+  if (!model || model.order === 0) return undefined;
+  let best: string | undefined;
+  let bestDeg = -1;
+  model.forEachNode((id, attr) => {
+    const d = Number(attr.deg) || 0;
+    if (d > bestDeg) {
+      bestDeg = d;
+      best = id;
+    }
+  });
+  return best;
+}
+
+// Re-index sigma after a layout move (positions changed → spatial index stale).
+function refreshIndexed(): void {
+  renderer?.refresh();
+}
+
+// Gentle continuous drift: each node bobs a few px on its own slow sine wave around
+// its resting spot (stable — always returns home; cheap math). Auto-disabled above
+// `motionMaxNodes`.
 function driftEligible(): boolean {
-  return !!cy && settings.physics && !document.hidden && cy.nodes().length <= settings.motionMaxNodes;
+  return !!model && settings.physics && !document.hidden && model.order <= settings.motionMaxNodes;
 }
 
 function startDrift(): void {
-  if (!cy || !driftEligible()) return;
+  if (!renderer || !model || !driftEligible()) return;
   stopDrift();
   driftHomes.clear();
   driftParams.clear();
-  cy.nodes().forEach((n) => {
-    const p = n.position();
-    driftHomes.set(n.id(), { x: p.x, y: p.y });
-    driftParams.set(n.id(), {
+  model.forEachNode((id, attr) => {
+    driftHomes.set(id, { x: Number(attr.x), y: Number(attr.y) });
+    driftParams.set(id, {
       ax: 2.5 + Math.random() * 3,
       ay: 2.5 + Math.random() * 3,
       fx: 0.3 + Math.random() * 0.5,
@@ -441,20 +663,17 @@ function startDrift(): void {
   });
   driftT0 = performance.now();
   const tick = () => {
-    if (!cy || driftRAF === undefined) return;
+    if (!renderer || !model || driftRAF === undefined) return;
     const t = (performance.now() - driftT0) / 1000;
-    cy.batch(() => {
-      cy!.nodes().forEach((n) => {
-        if (n.grabbed()) return; // don't fight an active drag
-        const home = driftHomes.get(n.id());
-        const pr = driftParams.get(n.id());
-        if (!home || !pr) return;
-        n.position({
-          x: home.x + pr.ax * Math.sin(t * pr.fx + pr.px),
-          y: home.y + pr.ay * Math.sin(t * pr.fy + pr.py),
-        });
-      });
+    model.forEachNode((id) => {
+      if (id === draggedNode) return; // don't fight an active drag
+      const home = driftHomes.get(id);
+      const pr = driftParams.get(id);
+      if (!home || !pr) return;
+      model!.setNodeAttribute(id, "x", home.x + pr.ax * Math.sin(t * pr.fx + pr.px));
+      model!.setNodeAttribute(id, "y", home.y + pr.ay * Math.sin(t * pr.fy + pr.py));
     });
+    refresh();
     driftRAF = requestAnimationFrame(tick);
   };
   driftRAF = requestAnimationFrame(tick);
@@ -465,150 +684,29 @@ function stopDrift(): void {
   driftRAF = undefined;
 }
 
-function fcoseOptions(spacing: number, nodes: number, edges: number): cytoscape.LayoutOptions {
-  // "draft" skips the expensive force-iteration refinement. Cost scales with
-  // EDGES as much as nodes (the capped view is the densest slice of the graph),
-  // so both gate the quality — full quality froze the editor on dense slices.
-  const heavy = nodes > 1200 || edges > 6000;
-  return {
-    name: "fcose",
-    quality: heavy ? "draft" : "default",
-    animate: nodes <= 200,
-    randomize: true,
-    fit: true,
-    padding: 40,
-    samplingType: true,
-    // Reserve room for each node INCLUDING its label box, so spacing exists
-    // between every neighboring node — but measuring every label is itself
-    // expensive, so only on comfortably small maps.
-    nodeDimensionsIncludeLabels: nodes <= 800 && edges <= 4000,
-    // Spread harder. Strong center-gravity was what piled everything into one
-    // clump, so keep gravity weak and its range wide, push neighbors apart with
-    // high repulsion, and give every pair generous separation — even the dense
-    // capped slice then opens up instead of stacking.
-    gravity: 0.05,
-    gravityRange: 6.0,
-    nodeRepulsion: 20000 + spacing * 140,
-    idealEdgeLength: Math.round(spacing * 1.3),
-    nodeSeparation: Math.max(120, spacing * 1.6),
-    packComponents: true,
-    // Disconnected nodes are tiled into a grid; pad that grid generously too.
-    tile: true,
-    tilingPaddingVertical: Math.max(40, Math.round(spacing / 3)),
-    tilingPaddingHorizontal: Math.max(40, Math.round(spacing / 3)),
-  } as unknown as cytoscape.LayoutOptions;
-}
-
-function buildStyle(maxDeg: number, bigRender = false): cytoscape.StylesheetStyle[] {
-  return [
-    {
-      selector: "node",
-      style: {
-        "background-color": "data(color)",
-        label: "data(label)",
-        width: `mapData(deg, 0, ${maxDeg}, 14, 52)`,
-        height: `mapData(deg, 0, ${maxDeg}, 14, 52)`,
-        "font-size": 10,
-        color: "#e6e6e6",
-        // Outline keeps text legible when it crosses edges or other nodes.
-        "text-outline-width": 2,
-        "text-outline-color": "#1b1b1b",
-        "text-outline-opacity": 0.85,
-        "text-valign": "bottom",
-        "text-halign": "center",
-        "text-margin-y": 3,
-        // Labels are culled whenever they'd render below a readable on-screen
-        // size — zoomed out you see shapes/colors only, and text appears as you
-        // zoom in. Hovered/selected nodes override this (see classes below).
-        "min-zoomed-font-size": bigRender ? 14 : 11,
-        "border-width": 0,
-        "transition-property": "width height border-width border-color background-blacken opacity",
-        "transition-duration": 130,
-      } as cytoscape.Css.Node,
-    },
-    {
-      selector: "node[external = 1]",
-      style: { "background-opacity": 0.5, "border-width": 1, "border-style": "dashed", "border-color": "#888" },
-    },
-    {
-      selector: "edge",
-      style: {
-        width: 1,
-        "line-color": "#5a5a5a",
-        "line-opacity": 0.5,
-        // Big maps use "haystack" — the cheapest edge renderer (no bezier/arrow
-        // math), at the cost of arrowheads. Small graphs keep directional arrows.
-        "curve-style": bigRender ? "haystack" : "straight",
-        "target-arrow-shape": bigRender ? "none" : "triangle",
-        "target-arrow-color": "#5a5a5a",
-        "arrow-scale": 0.6,
-      },
-    },
-    {
-      selector: "node.hover",
-      style: {
-        width: `mapData(deg, 0, ${maxDeg}, 24, 76)`,
-        height: `mapData(deg, 0, ${maxDeg}, 24, 76)`,
-        "border-width": 3,
-        "border-color": accent,
-        "border-opacity": 1,
-        "background-blacken": -0.2,
-        "z-index": 20,
-        // The node you're pointing at (and its neighbors / selection, below)
-        // always shows its name, however far out you're zoomed.
-        "min-zoomed-font-size": 0,
-        "font-size": 12,
-      } as cytoscape.Css.Node,
-    },
-    {
-      selector: "node.sel",
-      style: {
-        "border-width": 3, "border-color": accent, "border-style": "solid", "border-opacity": 1,
-        "min-zoomed-font-size": 0, "font-size": 12, "z-index": 21,
-      } as cytoscape.Css.Node,
-    },
-    {
-      selector: "node.hl",
-      style: {
-        "border-width": 2, "border-color": accent, "border-style": "solid", "border-opacity": 1,
-        "min-zoomed-font-size": 0, "z-index": 19,
-      } as cytoscape.Css.Node,
-    },
-    { selector: "edge.hl", style: { "line-color": accent, "target-arrow-color": accent, "line-opacity": 1, width: 2, "z-index": 9 } },
-    { selector: ".dim", style: { opacity: 0.12 } },
-    { selector: ".unfocused", style: { opacity: 0.12 } },
-  ];
-}
-
 // ---- hover ----
 // Hover dims everything else and enlarges + highlights the hovered node and its
 // neighbors. It never moves anything (the gentle drift keeps running underneath).
-function onHover(node: NodeSingular): void {
-  if (!settings.animateOnHover || !cy) return;
-  const focus = node.closedNeighborhood(); // the node + neighbor nodes + connecting edges
-  cy.elements().addClass("unfocused");
-  focus.removeClass("unfocused");
-  node.addClass("hover");
-  node.neighborhood("node").addClass("hover");
+function onHover(node: string): void {
+  if (!settings.animateOnHover || !model) return;
+  hoverId = node;
+  hoverSet = new Set<string>([node, ...model.neighbors(node)]);
+  refresh();
 }
 
-function offHover(_node: NodeSingular): void {
-  cy?.elements().removeClass("unfocused hover");
+function offHover(): void {
+  hoverId = undefined;
+  hoverSet = undefined;
+  refresh();
 }
 
 // ---- selection ----
 function select(id: string): void {
-  if (!cy) return;
+  if (!model || !model.hasNode(id)) return;
   selectedId = id;
-  cy.batch(() => {
-    cy!.elements().removeClass("sel hl");
-    const node = cy!.getElementById(id);
-    if (node.empty()) return;
-    node.addClass("sel");
-    const incident = node.connectedEdges();
-    incident.addClass("hl");
-    incident.connectedNodes().not(node).addClass("hl");
-  });
+  selSet = new Set<string>([id, ...model.neighbors(id)]);
+  selEdges = new Set<string>(model.edges(id));
+  refresh();
   if (graph) {
     detailEl.innerHTML = renderDetail(graph, byId, id, {
       containerMode: currentMeta?.mode === "containers",
@@ -618,16 +716,16 @@ function select(id: string): void {
 }
 
 function focusNode(id: string): void {
-  if (!cy) return;
-  const node = cy.getElementById(id);
-  if (node.empty()) return;
-  cy.animate({ center: { eles: node }, duration: 200 });
+  if (!model || !model.hasNode(id)) return;
+  centerOn(id, { duration: 200 });
   select(id);
 }
 
 function clearSelection(): void {
   selectedId = undefined;
-  cy?.elements().removeClass("sel hl");
+  selSet = undefined;
+  selEdges = undefined;
+  refresh();
   clearDetail();
 }
 
@@ -665,7 +763,7 @@ detailEl.addEventListener("click", (e) => {
 function applySettings(next: Settings): void {
   const prev = settings;
   settings = next;
-  if (!cy) return;
+  if (!renderer) return;
   if (prev.spacing !== next.spacing) {
     runLayout(); // re-space everything, then resume drift
   } else if (prev.physics !== next.physics || prev.motionMaxNodes !== next.motionMaxNodes) {
@@ -674,15 +772,15 @@ function applySettings(next: Settings): void {
   }
 }
 
-// Pause the drift while the tab is hidden so it doesn't burn CPU in the
-// background; resume when shown again.
+// Pause the drift while the tab is hidden so it doesn't burn CPU in the background;
+// resume when shown again.
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) stopDrift();
   else if (driftEligible()) startDrift();
 });
 
 // ---- filters ----
-function buildFilters(g: Graph): void {
+function buildFilters(g: GraphData): void {
   const edgeCounts = countBy(g.edges.map((e) => e.type));
 
   // Group nodes by type (sorted by label) so each type can expand into a
@@ -711,12 +809,12 @@ function buildFilters(g: Graph): void {
   }
 }
 
-// Cap on member rows drawn per expanded type — keeps the DOM small even when a
-// type has tens of thousands of nodes; the per-type search narrows past it.
+// Cap on member rows drawn per expanded type — keeps the DOM small even when a type
+// has tens of thousands of nodes; the per-type search narrows past it.
 const MEMBER_CAP = 250;
 
-// One expandable type group: header (twisty + on/off checkbox + name + count),
-// and a lazily-built, searchable, individually-checkable list of its nodes.
+// One expandable type group: header (twisty + on/off checkbox + name + count), and a
+// lazily-built, searchable, individually-checkable list of its nodes.
 function typeGroup(type: string, nodes: GraphNode[], color: string): HTMLElement {
   const group = document.createElement("div");
   group.className = "type-group";
@@ -787,8 +885,8 @@ function typeGroup(type: string, nodes: GraphNode[], color: string): HTMLElement
   twisty.addEventListener("click", toggleExpand);
   name.addEventListener("click", toggleExpand);
 
-  // Header checkbox toggles the whole type: if anything of it is visible, hide
-  // all; otherwise show all (works whether it was off or just all-hidden).
+  // Header checkbox toggles the whole type: if anything of it is visible, hide all;
+  // otherwise show all (works whether it was off or just all-hidden).
   cb.addEventListener("change", () => {
     const total = nodesByType.get(type)?.length ?? 0;
     const anyVisible = enabledNodeTypes.has(type) && hiddenCountOfType(type) < total;
@@ -822,8 +920,8 @@ function typeGroup(type: string, nodes: GraphNode[], color: string): HTMLElement
   return group;
 }
 
-// Render (up to MEMBER_CAP of) a type's nodes matching the search term, each with
-// a visibility checkbox and a name you can click to jump to it on the map.
+// Render (up to MEMBER_CAP of) a type's nodes matching the search term, each with a
+// visibility checkbox and a name you can click to jump to it on the map.
 function renderMembers(type: string, list: HTMLElement, more: HTMLElement, color: string, term: string): void {
   const all = nodesByType.get(type) ?? [];
   const t = term.trim().toLowerCase();
@@ -966,34 +1064,29 @@ function filterRow(
   return row;
 }
 
+// Recompute the visibility set (the single source of truth the reducers read) and
+// repaint. Replaces cytoscape's per-element display flag.
 function applyFilters(): void {
-  if (!cy) return;
+  if (!renderer || !model) return;
   const focusSet = focusVisibleIds(); // undefined = no focus restriction
-  cy.batch(() => {
-    const visible = new Set<string>();
-    cy!.nodes().forEach((n) => {
-      const show =
-        enabledNodeTypes.has(n.data("type")) &&
-        !hiddenNodeIds.has(n.id()) &&
-        (!focusSet || focusSet.has(n.id()));
-      if (show) visible.add(n.id());
-      n.style("display", show ? "element" : "none");
-    });
-    cy!.edges().forEach((e) => {
-      const ok =
-        enabledEdgeTypes.has(e.data("type")) && visible.has(e.source().id()) && visible.has(e.target().id());
-      e.style("display", ok ? "element" : "none");
-    });
+  const next = new Set<string>();
+  model.forEachNode((id, attr) => {
+    const show =
+      enabledNodeTypes.has(String(attr.type)) &&
+      !hiddenNodeIds.has(id) &&
+      (!focusSet || focusSet.has(id));
+    if (show) next.add(id);
   });
-  applySearch();
+  visibleIds = next;
+  refresh();
   updateStatus();
 }
 
 // ---- focus (isolate one node + its neighborhood) ----
 // The set of node ids reachable from the focused node within `focusDepth` hops,
-// traversing only type-enabled nodes/edges. Returns undefined when there's no
-// focus (or the focused node is itself hidden by a type filter) — i.e. no
-// restriction. Computed from the graph data, so it's independent of render state.
+// traversing only type-enabled nodes/edges. Returns undefined when there's no focus
+// (or the focused node is itself hidden by a type filter) — i.e. no restriction.
+// Computed from the graph data, so it's independent of render state.
 function focusVisibleIds(): Set<string> | undefined {
   if (!focusId || !graph) return undefined;
   const nodeOk = (id: string): boolean => {
@@ -1033,7 +1126,7 @@ function focusVisibleIds(): Set<string> | undefined {
 }
 
 function focusOnNode(id: string): void {
-  if (!cy || cy.getElementById(id).empty()) return;
+  if (!model || !model.hasNode(id)) return;
   focusId = id;
   applyFilters();
   updateFocusUI();
@@ -1050,9 +1143,8 @@ function clearFocus(): void {
 }
 
 function fitVisible(duration: number): void {
-  if (!cy) return;
-  const vis = cy.nodes().filter((n) => n.style("display") !== "none");
-  if (vis.nonempty()) cy.animate({ fit: { eles: vis, padding: 50 }, duration });
+  if (visibleIds.size === 0) return;
+  fitToNodeIds([...visibleIds], { padding: 50, duration });
 }
 
 function updateFocusUI(): void {
@@ -1116,8 +1208,8 @@ function syncChecks(container: HTMLElement, checked: boolean): void {
 
 // ---- search ----
 searchEl.addEventListener("input", () => applySearch());
-// Enter focuses the best match: exact label wins, otherwise the first partial —
-// the quick path to "narrow to this one object/class and its connections".
+// Enter focuses the best match: exact label wins, otherwise the first partial — the
+// quick path to "narrow to this one object/class and its connections".
 searchEl.addEventListener("keydown", (e) => {
   if (e.key !== "Enter") return;
   e.preventDefault();
@@ -1125,8 +1217,8 @@ searchEl.addEventListener("keydown", (e) => {
   if (id) {
     focusOnNode(id);
   } else if (searchEl.value.trim()) {
-    // Not in the rendered slice — the host holds the full graph; ask it to find
-    // the node and drill in to it (it answers with a new setGraph).
+    // Not in the rendered slice — the host holds the full graph; ask it to find the
+    // node and drill in to it (it answers with a new setGraph).
     vscodeApi.postMessage({ type: "find", query: searchEl.value.trim() });
   }
 });
@@ -1145,19 +1237,9 @@ function bestSearchMatch(): string | undefined {
 }
 
 function applySearch(): void {
-  if (!cy) return;
-  const term = searchEl.value.trim().toLowerCase();
-  cy.batch(() => {
-    if (!term) {
-      cy!.nodes().removeClass("dim");
-      return;
-    }
-    cy!.nodes().forEach((n) => {
-      const hit = String(n.data("label")).toLowerCase().includes(term);
-      if (hit) n.removeClass("dim");
-      else n.addClass("dim");
-    });
-  });
+  if (!renderer) return;
+  searchTerm = searchEl.value.trim().toLowerCase();
+  refresh();
   updateStatus();
 }
 
@@ -1178,17 +1260,17 @@ function updateLayoutModeUI(): void {
 }
 updateLayoutModeUI();
 $<HTMLButtonElement>("#relayout").addEventListener("click", () => runLayout());
-$<HTMLButtonElement>("#fit").addEventListener("click", () => cy?.fit(undefined, 30));
+$<HTMLButtonElement>("#fit").addEventListener("click", () => renderer?.getCamera().animatedReset({ duration: 300 }));
 $<HTMLButtonElement>("#toggle-filters").addEventListener("click", () => {
   document.getElementById("app")?.classList.toggle("filters-hidden");
-  setTimeout(() => cy?.resize(), 0);
+  setTimeout(() => renderer?.resize(), 0);
 });
 
 // ---- helpers ----
 function updateStatus(): void {
-  if (!cy || !graph) return;
+  if (!model || !graph) return;
   const drawn = graph.nodes.length;
-  const visibleNodes = cy.nodes().filter((n) => n.style("display") !== "none").length;
+  const visibleNodes = visibleIds.size;
   const nodePart = visibleNodes === drawn ? `${fmt(drawn)} nodes` : `${fmt(visibleNodes)}/${fmt(drawn)} nodes`;
   let prefix = "";
   let suffix = "";
@@ -1215,4 +1297,14 @@ function countBy(items: string[]): Map<string, number> {
 
 function sortedEntries(m: Map<string, number>): [string, number][] {
   return [...m.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+}
+
+// Blend a #rrggbb toward transparency (for external/dimmed fills).
+function hexToRgba(hex: string, alpha: number): string {
+  const h = hex.replace("#", "");
+  const v = h.length === 3 ? h.split("").map((c) => c + c).join("") : h;
+  const r = parseInt(v.slice(0, 2), 16) || 0;
+  const g = parseInt(v.slice(2, 4), 16) || 0;
+  const b = parseInt(v.slice(4, 6), 16) || 0;
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }

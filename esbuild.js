@@ -31,6 +31,9 @@ async function main() {
     outfile: "dist/webview.js",
     platform: "browser",
     format: "iife",
+    // Lets the bundle branch on build type: production strips the dev-only sigma
+    // window handles used by the headless harness, and dead-code-eliminates them.
+    define: { "process.env.NODE_ENV": production ? '"production"' : '"development"' },
   });
 
   const worker = await esbuild.context({
