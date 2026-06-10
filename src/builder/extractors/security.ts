@@ -104,11 +104,20 @@ class SecurityExtractor implements Extractor {
     const edges: RawEdge[] = [];
     for (const obj of [...acc.objects].sort()) if (obj) edges.push(rawEdge(aid, "grants", "object", obj));
     for (const cls of [...acc.classes].sort()) if (cls) edges.push(rawEdge(aid, "grants", "apexclass", cls));
-    for (const f of [...acc.fields].sort()) if (f) edges.push(rawEdge(aid, "grants", "field", f));
+    for (const f of [...acc.fields].sort()) {
+      if (!f) continue;
+      const flags = fieldAccess.get(f);
+      edges.push(rawEdge(aid, "grants", "field", f, flags ? { readable: flags.readable, editable: flags.editable } : {}));
+    }
     for (const tab of [...tabs].sort()) edges.push(rawEdge(aid, "grants", "tab", tab));
-    for (const app of [...apps.keys()].sort()) edges.push(rawEdge(aid, "grants", "app", app));
+    for (const app of [...apps.keys()].sort()) {
+      const v = apps.get(app)!;
+      edges.push(rawEdge(aid, "grants", "app", app, { visible: v.visible, default: v.default }));
+    }
     for (const obj of [...recordTypes.keys()].sort()) {
-      for (const _rname of [...recordTypes.get(obj)!].sort()) edges.push(rawEdge(aid, "grants", "object", obj));
+      for (const rname of [...recordTypes.get(obj)!].sort()) {
+        edges.push(rawEdge(aid, "grants", "object", obj, { record_type: rname }));
+      }
     }
     for (const cp of [...customPerms].sort()) edges.push(rawEdge(aid, "grants", "custompermission", cp));
     for (const pg of [...pages].sort()) edges.push(rawEdge(aid, "grants", "vfpage", pg));

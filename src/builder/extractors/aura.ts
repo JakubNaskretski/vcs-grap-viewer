@@ -9,6 +9,14 @@ import { readText } from "../salesforce";
 const MARKUP_EXTS = new Set([".cmp", ".app", ".evt"]);
 const CUSTOM_TAG = /<c:([A-Za-z_]\w*)\b/g;
 const CREATE_COMPONENT = /createComponent\s*\(\s*['"]c:([A-Za-z_]\w*)['"]/g;
+// Managed-package component refs: <ns:Comp> in markup / createComponent("ns:Comp").
+// Platform namespaces are skipped; the local `c` namespace is handled above.
+const NS_TAG = /<([A-Za-z][\w]*):([A-Za-z_]\w*)\b/g;
+const NS_CREATE_COMPONENT = /createComponent\s*\(\s*['"]([A-Za-z_]\w*):([A-Za-z_]\w*)['"]/g;
+const BUILTIN_AURA_NS = new Set([
+  "c", "aura", "ui", "lightning", "force", "forcechatter", "forcecommunity",
+  "ltng", "design", "apex", "flexipage", "wave", "lightningsnapin",
+]);
 const CONTROLLER_ATTR = /\bcontroller\s*=\s*['"]([\w.]+)['"]/g;
 const DEPENDENCY_TAG = /<aura:dependency\b[^>]*>/g;
 const RESOURCE_ATTR = /\bresource\s*=\s*['"]([^'"]+)['"]/g;
@@ -60,6 +68,14 @@ class AuraExtractor implements Extractor {
     const children = new Set<string>();
     for (const m of markup.matchAll(CUSTOM_TAG)) if (m[1] && m[1] !== name) children.add(m[1]);
     for (const m of jsSrc.matchAll(CREATE_COMPONENT)) if (m[1] && m[1] !== name) children.add(m[1]);
+    // Managed-package children keep their namespace: <vlocity_cmt:CardFrame>
+    // -> vlocity_cmt__CardFrame.
+    for (const m of markup.matchAll(NS_TAG)) {
+      if (!BUILTIN_AURA_NS.has(m[1].toLowerCase()) && m[2]) children.add(`${m[1]}__${m[2]}`);
+    }
+    for (const m of jsSrc.matchAll(NS_CREATE_COMPONENT)) {
+      if (!BUILTIN_AURA_NS.has(m[1].toLowerCase()) && m[2]) children.add(`${m[1]}__${m[2]}`);
+    }
     for (const c of [...children].sort()) edges.push(rawEdge(aid, "uses-component", "aura", c));
 
     const classes = new Set<string>();

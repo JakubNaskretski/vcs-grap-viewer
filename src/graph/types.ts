@@ -19,6 +19,8 @@ export interface GraphEdge {
   src: string;
   dst: string;
   type: string;
+  /** Edge attributes (readable, record_type, …) — surfaced in the detail panel. */
+  [key: string]: unknown;
 }
 
 export interface Graph {

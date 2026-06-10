@@ -1,7 +1,7 @@
 import * as path from "path";
 import * as vscode from "vscode";
 import { Graph } from "./graph/types";
-import { exploreView, isNestedType, rollupToContainers } from "./graph/rollup";
+import { containerId, exploreView, isNestedId, isNestedType, rollupToContainers, topConnectedSlice } from "./graph/rollup";
 import { GraphSource } from "./sources";
 
 const BIG_GRAPH = 2500; // above this many nodes, default to the container-level view
@@ -133,7 +133,7 @@ export class GraphPanel {
     this.disposables.push(this.watcher);
   }
 
-  private onMessage(msg: { type?: string; mode?: "containers" | "all"; id?: string }): void {
+  private onMessage(msg: { type?: string; mode?: "containers" | "all"; id?: string; query?: string }): void {
     if (msg?.type === "ready") {
       this.webviewReady = true;
       this.post();
@@ -148,7 +148,37 @@ export class GraphPanel {
     } else if (msg?.type === "resetExploration") {
       this.expanded.clear();
       this.post();
+    } else if (msg?.type === "find" && msg.query) {
+      this.findInFullGraph(msg.query);
     }
+  }
+
+  /** Host-assisted search: the webview may only hold a capped slice, so when its
+   *  local search misses, look the term up in the FULL graph and drill in to the
+   *  hit (expanding its container so a nested hit becomes visible). */
+  private findInFullGraph(query: string): void {
+    if (!this.fullGraph) return;
+    const term = query.trim().toLowerCase();
+    if (!term) return;
+    let partial: string | undefined;
+    let hit: string | undefined;
+    for (const n of this.fullGraph.nodes) {
+      const label = (n.label || "").toLowerCase();
+      if (label === term) {
+        hit = n.id;
+        break;
+      }
+      if (!partial && (label.includes(term) || n.id.toLowerCase().includes(term))) partial = n.id;
+    }
+    hit ??= partial;
+    if (!hit) {
+      void this.panel.webview.postMessage({ type: "findResult", found: false, query });
+      return;
+    }
+    // Drill in to the hit: expand its container (or itself, if it is a main node)
+    // and echo the hit id so the webview selects it.
+    this.expanded.add(isNestedId(hit) ? containerId(hit) : hit);
+    this.post(hit);
   }
 
   /** Switch between the container-level map and the full graph. Showing the full
@@ -194,6 +224,21 @@ export class GraphPanel {
         graph = this.rolledGraph;
       }
     }
+    // Hard render cap on the container overview: it can be huge despite the
+    // rollup (graphs dominated by types that don't roll up — labels, custom
+    // metadata records, objects). Rendering tens of thousands of nodes crashes
+    // the webview, so the default landing view never exceeds the cap; drill-in
+    // is per-step bounded already, and "Show all" stays modal-confirmed.
+    let capDropped = 0;
+    if (mode === "containers" && !exploring) {
+      const cap = Math.max(
+        100,
+        vscode.workspace.getConfiguration("graphViewer").get<number>("maxRenderNodes", 1500),
+      );
+      const sliced = topConnectedSlice(graph, cap);
+      graph = sliced.graph;
+      capDropped = sliced.dropped;
+    }
     void this.panel.webview.postMessage({
       type: "setGraph",
       graph,
@@ -211,6 +256,7 @@ export class GraphPanel {
         expanded: [...this.expanded],
         expandedCount: this.expanded.size,
         truncatedRoot,
+        capDropped,
       },
     });
   }

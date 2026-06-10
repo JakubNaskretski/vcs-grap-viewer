@@ -59,12 +59,15 @@ export const ALL_EXTRACTORS = [
   ...OMNISTUDIO_EXTRACTORS,
 ];
 
-/** Build the metadata graph for a force-app directory. */
-export function buildGraph(root: string): BuildResult {
-  return new GraphBuilder()
-    .register(...ALL_EXTRACTORS)
-    .registerResolver(...defaultResolvers())
-    .build(walkFiles(root));
+/** A builder wired with every extractor + resolver — the single construction point. */
+export function makeBuilder(): GraphBuilder {
+  return new GraphBuilder().register(...ALL_EXTRACTORS).registerResolver(...defaultResolvers());
 }
 
-export type { BuildResult } from "./core";
+/** Build the metadata graph for a force-app directory. */
+export function buildGraph(root: string): BuildResult {
+  return makeBuilder().build(walkFiles(root));
+}
+
+export { walkFiles } from "./fsutil";
+export type { BuildResult, ExtractResult } from "./core";

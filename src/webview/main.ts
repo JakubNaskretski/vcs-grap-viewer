@@ -42,6 +42,8 @@ interface Meta {
   expanded: string[];
   expandedCount: number;
   truncatedRoot: number;
+  // How many nodes the maxRenderNodes cap dropped from this view (0 = uncapped).
+  capDropped: number;
 }
 
 const accent =
@@ -112,6 +114,8 @@ window.addEventListener("message", (event) => {
     }
   } else if (msg?.type === "updateSettings") {
     applySettings(msg.settings as Settings);
+  } else if (msg?.type === "findResult" && msg.found === false) {
+    statusEl.textContent = `no match for “${String(msg.query ?? "")}” in the full graph`;
   }
 });
 
@@ -221,16 +225,15 @@ function runLayout(): void {
     requestAnimationFrame(() => {
       if (!cy) return;
       cy.resize();
-      const n = cy.nodes().length;
-      if (n > 1500) {
-        // Big map: fit the whole thing so the user sees the overall shape rather
-        // than landing zoomed onto a single hub in a sea of nodes.
-        cy.fit(undefined, 30);
-      } else {
-        // Land zoomed-in, centered on the most-connected (and largest) node.
-        cy.zoom(1.5);
-        if (n > 0) cy.center(cy.nodes().max((d) => Number(d.data("deg")) || 0).ele);
-      }
+      // Land zoomed-in, centered on the selected node (e.g. a search hit the host
+      // just drilled in to) or else the most-connected (and largest) node — at
+      // every size. The host caps how much is rendered, so fitting "everything"
+      // (the old big-map behavior) is never the right landing: it draws the whole
+      // sea of nodes at once. The Fit button still does a full fit on demand.
+      cy.zoom(1.5);
+      const sel = selectedId ? cy.getElementById(selectedId) : undefined;
+      if (sel && sel.nonempty()) cy.center(sel);
+      else if (cy.nodes().length > 0) cy.center(cy.nodes().max((d) => Number(d.data("deg")) || 0).ele);
       if (driftEligible()) startDrift();
     });
   });
@@ -908,7 +911,13 @@ searchEl.addEventListener("keydown", (e) => {
   if (e.key !== "Enter") return;
   e.preventDefault();
   const id = bestSearchMatch();
-  if (id) focusOnNode(id);
+  if (id) {
+    focusOnNode(id);
+  } else if (searchEl.value.trim()) {
+    // Not in the rendered slice — the host holds the full graph; ask it to find
+    // the node and drill in to it (it answers with a new setGraph).
+    vscodeApi.postMessage({ type: "find", query: searchEl.value.trim() });
+  }
 });
 
 function bestSearchMatch(): string | undefined {
@@ -959,7 +968,9 @@ function updateStatus(): void {
   let suffix = "";
   if (currentMeta) {
     prefix = currentMeta.exploring ? "exploring · " : currentMeta.mode === "containers" ? "containers · " : "full · ";
-    if (currentMeta.mode === "containers" && currentMeta.totalNodes > drawn) {
+    if (currentMeta.capDropped > 0) {
+      suffix = ` — top ${fmt(drawn)} of ${fmt(currentMeta.totalNodes)} by connectivity; search reaches the rest`;
+    } else if (currentMeta.mode === "containers" && currentMeta.totalNodes > drawn) {
       suffix = ` (of ${fmt(currentMeta.totalNodes)})`;
     }
   }

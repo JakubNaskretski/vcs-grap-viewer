@@ -14,6 +14,14 @@ const MESSAGE_CHANNEL = /['"]@salesforce\/messageChannel\/([\w.$]+)['"]/g;
 const APEX_IMPORT_BINDING = /import\s+(\w+)\s+from\s+['"]@salesforce\/apex\/(\w+)\.(\w+)['"]/g;
 const WIRE_ADAPTER = /@wire\s*\(\s*(\w+)/g;
 const CUSTOM_ELEMENT = /<c-([a-z0-9]+(?:-[a-z0-9]+)*)\b/g;
+// Managed-package component tag: <ns-comp-name> where ns is the package namespace
+// (may contain underscores, e.g. vlocity_cmt). Platform namespaces are skipped;
+// the local `c` namespace is handled by CUSTOM_ELEMENT above.
+const NAMESPACED_ELEMENT = /<([a-z][a-z0-9_]*)-([a-z0-9_]+(?:-[a-z0-9_]+)*)\b/g;
+const BUILTIN_TAG_NS = new Set([
+  "c", "lightning", "lwc", "aura", "ui", "force", "forcechatter", "forcecommunity",
+  "ltng", "laf", "lightningsnapin", "site", "clients",
+]);
 
 function kebabToCamel(tag: string): string {
   const parts = tag.split("-").filter(Boolean);
@@ -103,6 +111,14 @@ class LwcExtractor implements Extractor {
       for (const m of html.matchAll(CUSTOM_ELEMENT)) {
         const name = kebabToCamel(m[1]);
         if (name && name !== selfName) found.add(name);
+      }
+      // Managed-package children keep their namespace: <vlocity_cmt-card-frame>
+      // -> vlocity_cmt__cardFrame (matching how flows reference namespaced LWC).
+      for (const m of html.matchAll(NAMESPACED_ELEMENT)) {
+        const ns = m[1];
+        if (BUILTIN_TAG_NS.has(ns)) continue;
+        const name = kebabToCamel(m[2]);
+        if (name) found.add(`${ns}__${name}`);
       }
     }
     return found;

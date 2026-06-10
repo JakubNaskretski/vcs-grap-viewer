@@ -8,8 +8,8 @@ export const NODE_TYPES: ReadonlySet<string> = new Set([
   "omniscript", "integrationprocedure", "datamapper", "flexcard",
   "label", "approvalprocess", "sharingrule", "app", "tab", "recordtype",
   "aura", "vfpage", "vfcomponent", "quickaction", "layout",
-  "queue", "publicgroup", "role", "emailtemplate", "report", "dashboard",
-  "custompermission", "customnotificationtype",
+  "queue", "publicgroup", "role", "emailtemplate", "emailalert", "report",
+  "dashboard", "custompermission", "customnotificationtype",
   "assignmentrule", "escalationrule", "duplicaterule", "matchingrule",
   "custommetadatarecord", "globalvalueset", "listview", "platformeventchannel",
   "resource", "messagechannel",
@@ -31,12 +31,15 @@ export interface RawNode {
 }
 
 /** A raw edge whose target is named logically as (to_kind, to_name); the concrete
- *  destination id is filled in during the resolve pass. */
+ *  destination id is filled in during the resolve pass. Extra keys (readable,
+ *  record_type, …) are edge attributes carried through to the resolved edge —
+ *  mirrors graph-builder, where raw_edge() returns a freely-decorated dict. */
 export interface RawEdge {
   src: string;
   type: string;
   to_kind: string;
   to_name: string;
+  [key: string]: unknown;
 }
 
 /** Build a node. Label defaults to the id's name segment (everything after the
@@ -47,6 +50,12 @@ export function node(id: string, type: string, label?: string, attrs: Record<str
   return { id, type, label: label || fallback, ...attrs };
 }
 
-export function rawEdge(src: string, type: string, toKind: string, toName: string): RawEdge {
-  return { src, type, to_kind: toKind, to_name: toName };
+export function rawEdge(
+  src: string,
+  type: string,
+  toKind: string,
+  toName: string,
+  attrs: Record<string, unknown> = {},
+): RawEdge {
+  return { src, type, to_kind: toKind, to_name: toName, ...attrs };
 }

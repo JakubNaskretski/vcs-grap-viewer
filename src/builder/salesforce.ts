@@ -145,6 +145,13 @@ export interface SFFlexiPage {
   lwcRefs: Set<string>;
 }
 
+// Platform component namespaces on flexipages — never custom/managed components.
+const FLEXIPAGE_BUILTIN_NS = new Set([
+  "flexipage", "force", "forcecommunity", "forceknowledge", "lightning",
+  "lightningcommunity", "lightningsnapin", "native", "interop", "aura", "ui",
+  "siteforce", "sfa", "wave", "cms",
+]);
+
 export function parseFlexipage(filePath: string): SFFlexiPage {
   const name = path.basename(filePath).replace(/\.flexipage-meta\.xml$/i, "");
   const fp: SFFlexiPage = { name, sobject: "", lwcRefs: new Set() };
@@ -152,7 +159,15 @@ export function parseFlexipage(filePath: string): SFFlexiPage {
   if (!root) return fp;
   fp.sobject = text(root, "sobjectType");
   for (const c of iterText(root, "componentName")) {
-    if (c.startsWith("c:")) fp.lwcRefs.add(c.slice(c.indexOf(":") + 1));
+    const colon = c.indexOf(":");
+    if (colon <= 0) continue;
+    const ns = c.slice(0, colon).toLowerCase();
+    const comp = c.slice(colon + 1);
+    if (!comp) continue;
+    // custom LWC/Aura are referenced as "c:componentName"; managed-package
+    // components as "ns:componentName" -> keep the namespace as ns__componentName.
+    if (ns === "c") fp.lwcRefs.add(comp);
+    else if (!FLEXIPAGE_BUILTIN_NS.has(ns) && !ns.startsWith("runtime_")) fp.lwcRefs.add(`${ns}__${comp}`);
   }
   return fp;
 }

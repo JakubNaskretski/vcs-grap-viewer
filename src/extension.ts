@@ -9,6 +9,8 @@ import { FileGraphSource, resolveGraphSource } from "./sources";
 export function activate(context: vscode.ExtensionContext): void {
   const library = new GraphLibrary(context);
   const libraryView = new GraphLibraryProvider(library);
+  const log = vscode.window.createOutputChannel("Graph Viewer");
+  context.subscriptions.push(log);
 
   context.subscriptions.push(
     vscode.window.registerTreeDataProvider("graphViewer.library", libraryView),
@@ -71,22 +73,46 @@ export function activate(context: vscode.ExtensionContext): void {
             )?.[0];
       if (!folder) return;
       try {
+        const started = Date.now();
+        let timings: BuildTimings | undefined;
         const entry = await vscode.window.withProgress(
           {
             location: vscode.ProgressLocation.Notification,
             title: `Building graph from "${path.basename(folder.fsPath)}"…`,
             cancellable: true,
           },
-          async (_progress, token) => {
-            const raw = await runBuildWorker(context, folder.fsPath, token);
-            if (raw === undefined) return undefined; // cancelled
-            return library.add(path.basename(folder.fsPath), normalizeGraph(raw), folder.fsPath);
+          async (progress, token) => {
+            let lastPct = 0;
+            const result = await runBuildWorker(context, folder.fsPath, token, (p) => {
+              if (p.phase === "extract" && p.total > 0) {
+                const pct = Math.floor((p.done / p.total) * 100);
+                progress.report({
+                  message: `extracting ${p.done.toLocaleString()}/${p.total.toLocaleString()} files`,
+                  increment: pct - lastPct,
+                });
+                lastPct = pct;
+              } else if (p.phase === "resolve") {
+                progress.report({ message: "resolving references…", increment: 100 - lastPct });
+                lastPct = 100;
+              }
+            });
+            if (result === undefined) return undefined; // cancelled
+            timings = result.timings;
+            return library.add(path.basename(folder.fsPath), normalizeGraph(result.graph), folder.fsPath);
           },
         );
         if (!entry) return; // cancelled
         libraryView.refresh();
+        const took = fmtDuration(Date.now() - started);
+        if (timings) {
+          log.appendLine(
+            `[build] ${folder.fsPath} — ${entry.nodeCount} nodes, ${entry.edgeCount} edges in ${took} ` +
+              `(${timings.files.toLocaleString()} files, ${timings.workers} worker${timings.workers === 1 ? "" : "s"}: ` +
+              `walk ${fmtDuration(timings.walkMs)} · extract ${fmtDuration(timings.extractMs)} · resolve ${fmtDuration(timings.resolveMs)})`,
+          );
+        }
         const choice = await vscode.window.showInformationMessage(
-          `Built "${entry.name}" — ${entry.nodeCount} nodes, ${entry.edgeCount} edges.`,
+          `Built "${entry.name}" — ${entry.nodeCount.toLocaleString()} nodes, ${entry.edgeCount.toLocaleString()} edges in ${took}.`,
           "Open",
         );
         if (choice === "Open") await openStored(context, library, entry);
@@ -123,13 +149,29 @@ async function openStored(
   await GraphPanel.createOrShow(context, new FileGraphSource(library.pathFor(entry.id), entry.name));
 }
 
-/** Run the graph build in a worker thread. Resolves the raw graph, or `undefined`
- *  if cancelled. Keeps the extension host (and UI) responsive during the build. */
+interface BuildTimings {
+  files: number;
+  workers: number;
+  walkMs: number;
+  extractMs: number;
+  resolveMs: number;
+}
+
+interface BuildProgress {
+  phase: "walk" | "extract" | "resolve";
+  done: number;
+  total: number;
+}
+
+/** Run the graph build in a worker thread (which fans extraction out across its
+ *  own worker pool). Resolves the raw graph + phase timings, or `undefined` if
+ *  cancelled. Keeps the extension host (and UI) responsive during the build. */
 function runBuildWorker(
   context: vscode.ExtensionContext,
   root: string,
   token: vscode.CancellationToken,
-): Promise<unknown | undefined> {
+  onProgress?: (p: BuildProgress) => void,
+): Promise<{ graph: unknown; timings?: BuildTimings } | undefined> {
   return new Promise((resolve, reject) => {
     const workerPath = vscode.Uri.joinPath(context.extensionUri, "dist", "builder.worker.js").fsPath;
     const worker = new Worker(workerPath);
@@ -137,16 +179,32 @@ function runBuildWorker(
     const finish = (fn: () => void) => {
       if (settled) return;
       settled = true;
-      void worker.terminate();
+      void worker.terminate(); // also tears down the coordinator's child workers
       fn();
     };
     token.onCancellationRequested(() => finish(() => resolve(undefined)));
-    worker.once("message", (msg: { ok: boolean; graph?: unknown; error?: string }) =>
-      finish(() => (msg.ok ? resolve(msg.graph) : reject(new Error(msg.error ?? "build failed")))),
+    worker.on(
+      "message",
+      (msg: { type?: string; ok?: boolean; graph?: unknown; error?: string; timings?: BuildTimings } & Partial<BuildProgress>) => {
+        if (msg.type === "progress") {
+          if (!settled && msg.phase) onProgress?.({ phase: msg.phase, done: msg.done ?? 0, total: msg.total ?? 0 });
+          return;
+        }
+        finish(() =>
+          msg.ok ? resolve({ graph: msg.graph, timings: msg.timings }) : reject(new Error(msg.error ?? "build failed")),
+        );
+      },
     );
     worker.once("error", (err) => finish(() => reject(err)));
     worker.postMessage(root);
   });
+}
+
+function fmtDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  return `${Math.floor(s / 60)}m ${s % 60}s`;
 }
 
 export function deactivate(): void {

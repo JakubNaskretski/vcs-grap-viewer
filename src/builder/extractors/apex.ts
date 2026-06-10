@@ -8,8 +8,13 @@ import { Extractor } from "../core";
 import { node, rawEdge, RawEdge, RawNode } from "../model";
 import { readText, stripApex } from "../salesforce";
 
+// Modifiers are optional (`*`) so interface methods and default-access class
+// methods — which carry no access modifier — are matched too. `ret` is a single
+// type token (ident, optional generic, optional []); it must not span whitespace,
+// or with optional modifiers a greedy ret would swallow annotations + modifiers
+// across lines and mis-split (and lazily backtrack across big generated classes).
 const METHOD_RE =
-  /(?<modifiers>(?:(?:public|private|protected|global|static|virtual|abstract|override|final|webservice|testmethod)\s+)+)(?<ret>[\w.<>,[\]\s]+?)\s+(?<name>\w+)\s*\((?<params>[^)]*)\)\s*(?<body>\{|;)/gi;
+  /(?<modifiers>(?:(?:public|private|protected|global|static|virtual|abstract|override|final|webservice|testmethod)\s+)*)(?<ret>[A-Za-z_][\w.]*(?:<[^{}();]*>)?(?:\[\s*\])?)\s+(?<name>\w+)\s*\((?<params>[^)]*)\)\s*(?<body>\{|;)/gi;
 
 const NOT_METHODS = new Set([
   "if", "for", "while", "switch", "catch", "return", "new", "else", "do",

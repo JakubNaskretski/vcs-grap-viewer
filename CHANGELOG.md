@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.5.1
+
+### Faster builds, safer big-graph rendering, managed-package coverage
+
+- **Graph builds now run in parallel** across worker threads and report live
+  progress ("extracting 12,400/53,000 files"), with phase timings in a new
+  **Graph Viewer** output channel. Long builds are no longer a silent wait.
+- **Huge graphs can't crash the view anymore.** The container overview is capped
+  to the most-connected nodes (new `graphViewer.maxRenderNodes` setting, default
+  1,500); the status bar shows "top 1,500 of 37,993 by connectivity". Drill-in,
+  filters, and the confirmed "Show all" are unchanged.
+- **The map always lands zoomed in on the most-connected node** — big maps
+  previously fit the entire graph at once, which could freeze or crash the editor.
+- **Search reaches the whole graph**: pressing Enter on a name that isn't drawn
+  asks the extension host to find it in the full graph and drill in to it.
+- **Managed-package components are now mapped.** Namespaced components (e.g.
+  `vlocity_cmt:…`) referenced on Lightning pages, in LWC templates, and in Aura
+  markup become proper graph nodes instead of being skipped.
+- **More accurate extraction:** Big Objects (`__b`) and External Objects (`__x`)
+  are classified; flow email-alert actions resolve; Apex methods without an access
+  modifier are captured (also removes a pathological-regex slowdown on large
+  generated classes); permission grants keep their read/edit, app-visibility, and
+  record-type details on the edges; OmniStudio components no longer emit duplicate
+  edges.
+
 ## 0.5.0
 
 ### Expand a container into its members

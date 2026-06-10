@@ -43,7 +43,7 @@ export function normalizeGraph(data: unknown): Graph {
     const type = typeof e.type === "string" ? e.type : "related";
     // Keep only edges whose endpoints both exist — a dangling edge can't be drawn.
     if (!src || !dst || !ids.has(src) || !ids.has(dst)) continue;
-    edges.push({ src, dst, type });
+    edges.push({ ...(e as object), src, dst, type } as GraphEdge);
   }
 
   return {
