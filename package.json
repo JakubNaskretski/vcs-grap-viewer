@@ -2,8 +2,9 @@
   "name": "vcs-grap-viewer",
   "displayName": "Graph Viewer",
   "description": "Visualize and explore a metadata graph (nodes + edges) as an interactive, filterable map — an Obsidian-style graph view inside your editor.",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "publisher": "Skrety",
+  "icon": "plugin-icon.png",
   "license": "MIT",
   "engines": {
     "vscode": "^1.85.0"

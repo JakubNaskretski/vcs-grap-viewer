@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.2
+
+- Add a branded extension icon — shown on the Marketplace listing and the activity-bar.
+
 ## 0.6.1
 
 ### Clearer selection, calmer zoom, and a node "Explore" panel
