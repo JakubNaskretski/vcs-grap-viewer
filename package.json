@@ -1,5 +1,5 @@
 {
-  "name": "vcs-grap-viewer",
+  "name": "vcs-graph-viewer",
   "displayName": "Graph Viewer",
   "description": "Visualize and explore a metadata graph (nodes + edges) as an interactive, filterable map — an Obsidian-style graph view inside your editor.",
   "version": "0.6.2",
@@ -201,6 +201,7 @@
     "package": "npx -y @vscode/vsce@latest package --no-dependencies --allow-missing-repository"
   },
   "dependencies": {
+    "@apexdevtools/apex-parser": "^5.0.0",
     "fast-xml-parser": "^4.5.6",
     "graphology": "^0.25.4",
     "graphology-communities-louvain": "^2.0.1",

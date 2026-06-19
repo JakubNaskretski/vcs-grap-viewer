@@ -28,12 +28,19 @@ interface ProgressMsg {
   total: number;
 }
 
+/** Coordinator request: a root to build, plus the optional source-type filter. */
+interface BuildRequest {
+  root: string;
+  include?: string[];
+}
+
 // ---- extract child: pass 1 over one chunk ----------------------------------
 if (workerData?.role === "extract") {
+  const include = (workerData?.include as string[] | undefined) ?? undefined;
   parentPort?.on("message", (files: string[]) => {
     try {
       let lastSent = 0;
-      const result = makeBuilder().extract(files, (done) => {
+      const result = makeBuilder({ include }).extract(files, (done) => {
         if (done - lastSent >= PROGRESS_EVERY || done === files.length) {
           lastSent = done;
           parentPort?.postMessage({ type: "progress", done });
@@ -48,19 +55,21 @@ if (workerData?.role === "extract") {
 
 // ---- coordinator: walk -> parallel extract -> resolve -----------------------
 else {
-  parentPort?.on("message", (root: string) => {
-    void coordinate(root);
+  parentPort?.on("message", (req: BuildRequest | string) => {
+    // Back-compat: a bare string is still accepted as the root (no type filter).
+    const { root, include } = typeof req === "string" ? { root: req, include: undefined } : req;
+    void coordinate(root, include);
   });
 }
 
-async function coordinate(root: string): Promise<void> {
+async function coordinate(root: string, include?: string[]): Promise<void> {
   try {
     const t0 = Date.now();
     const files = walkFiles(root);
     const tWalk = Date.now();
     progress({ type: "progress", phase: "extract", done: 0, total: files.length });
 
-    const chunks = await extractAll(files);
+    const chunks = await extractAll(files, include);
     const tExtract = Date.now();
     progress({ type: "progress", phase: "resolve", done: 0, total: 0 });
 
@@ -73,7 +82,7 @@ async function coordinate(root: string): Promise<void> {
       pending.push(...chunk.pending);
       errors.push(...chunk.errors);
     }
-    const graph = makeBuilder().resolve(registry, pending, errors);
+    const graph = makeBuilder({ include }).resolve(registry, pending, errors);
     const tResolve = Date.now();
 
     parentPort?.postMessage({
@@ -93,17 +102,17 @@ async function coordinate(root: string): Promise<void> {
 }
 
 /** Pass 1 over all files: parallel when it pays off, sequential otherwise. */
-async function extractAll(files: string[]): Promise<ExtractResult[]> {
+async function extractAll(files: string[], include?: string[]): Promise<ExtractResult[]> {
   if (files.length >= PARALLEL_THRESHOLD && MAX_WORKERS > 1) {
     try {
-      return await extractParallel(files);
+      return await extractParallel(files, include);
     } catch {
       // worker spin-up failed (restricted env?) — fall through to sequential
     }
   }
   let lastSent = 0;
   return [
-    makeBuilder().extract(files, (done) => {
+    makeBuilder({ include }).extract(files, (done) => {
       if (done - lastSent >= PROGRESS_EVERY || done === files.length) {
         lastSent = done;
         progress({ type: "progress", phase: "extract", done, total: files.length });
@@ -112,7 +121,7 @@ async function extractAll(files: string[]): Promise<ExtractResult[]> {
   ];
 }
 
-function extractParallel(files: string[]): Promise<ExtractResult[]> {
+function extractParallel(files: string[], include?: string[]): Promise<ExtractResult[]> {
   const chunkSize = Math.ceil(files.length / MAX_WORKERS);
   const chunks: string[][] = [];
   for (let i = 0; i < files.length; i += chunkSize) chunks.push(files.slice(i, i + chunkSize));
@@ -130,7 +139,7 @@ function extractParallel(files: string[]): Promise<ExtractResult[]> {
     chunks.map(
       (chunk, i) =>
         new Promise<ExtractResult>((resolve, reject) => {
-          const child = new Worker(__filename, { workerData: { role: "extract" } });
+          const child = new Worker(__filename, { workerData: { role: "extract", include } });
           child.on("message", (msg: { type: string; done?: number; result?: ExtractResult; error?: string }) => {
             if (msg.type === "progress") {
               doneByChunk[i] = msg.done ?? 0;

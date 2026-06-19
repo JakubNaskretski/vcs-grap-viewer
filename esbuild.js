@@ -42,6 +42,11 @@ async function main() {
     outfile: "dist/builder.worker.js",
     platform: "node",
     format: "cjs",
+    // The Apex ANTLR backend pulls in antlr4, whose runtime calls
+    // createRequire(import.meta.url). In a CJS bundle import.meta.url is
+    // undefined and crashes at load, so shim it to the bundle's own file URL.
+    define: { "import.meta.url": "__importMetaUrl" },
+    banner: { js: 'const __importMetaUrl = require("url").pathToFileURL(__filename).href;' },
   });
 
   if (watch) {

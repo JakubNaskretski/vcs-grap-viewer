@@ -43,8 +43,10 @@ Two ways:
 
 1. **Generate it in-plugin** (no external tooling). Open the **Graphs** view in the
    Activity Bar → **Generate from folder…**, or right-click a source folder in the
-   Explorer → **Generate Graph from Folder**. The built-in builder parses a
-   Salesforce `force-app` into the graph and stores it in your library.
+   Explorer → **Generate Graph from Folder**. You're asked which metadata source
+   types to include (all on by default) — narrow it to just Apex, flows, objects,
+   etc. when you want a focused graph. The built-in builder parses a Salesforce
+   `force-app` into the graph and stores it in your library.
 2. **Import an existing `graph.json`** produced by **graph-builder**
    (`python -m graphbuilder path/to/source -o graph.json`) via the **Graphs** view
    → **Import**, or open one ad-hoc with **Graph Viewer: Open**.
@@ -73,10 +75,11 @@ The graph is plain JSON; any tool that emits the same shape works:
 | `graphViewer.graphPath`       | `""`    | Path to the graph file. Relative paths resolve against the workspace. |
 | `graphViewer.reloadOnChange`  | `true`  | Reload the view when the graph file changes on disk.    |
 | `graphViewer.physics`         | `true`  | Gentle Obsidian-style drift after the layout settles. Auto-disables on large graphs (see Motion Max Nodes). Off = fully static. |
-| `graphViewer.spacing`         | `150`   | Spacing between nodes (20–500). Higher spreads the graph out more. |
+| `graphViewer.spacing`         | `220`   | Spacing between nodes (20–500). Higher spreads the graph out more. |
 | `graphViewer.animateOnHover`  | `true`  | On hover, dim the rest of the graph and enlarge + highlight the node and its neighbors. |
 | `graphViewer.motionMaxNodes`  | `800`   | Above this node count the gentle drift turns off so large graphs stay responsive. |
 | `graphViewer.maxRelatedNodes` | `10`    | When you expand a container node, how many related main nodes to reveal per step (0–∞). |
+| `graphViewer.maxRenderNodes`  | `1500`  | Hard cap on nodes drawn at once (≥100). Above it, only the most-connected nodes render; search and drill-in still reach everything. "Show all" bypasses it. |
 
 Appearance settings apply live — no reload needed.
 
@@ -93,10 +96,11 @@ Press <kbd>F5</kbd> to launch an Extension Development Host, then open the
 The in-plugin builder is a TypeScript port of graph-builder's Salesforce
 extractors, so generating a graph needs no Python. It covers objects, fields,
 Apex, triggers, flows, LWC, Aura, Visualforce, OmniStudio, permission
-sets/profiles, layouts, reports, rules, and more. (Apex uses a regex parser with
-a lightweight per-method symbol table for `var.method()` resolution; deep
-instance-call resolution is still lighter than graph-builder's optional
-tree-sitter backend.)
+sets/profiles, layouts, reports, rules, and more. (Apex is parsed from a real
+syntax tree via ANTLR — `@apexdevtools/apex-parser` — for accurate method,
+call, SOQL/DML, and `var.method()` resolution, including generics in
+`implements`; a regex parser is the automatic fallback for any `.cls` the
+grammar can't cleanly parse.)
 
 ## License
 

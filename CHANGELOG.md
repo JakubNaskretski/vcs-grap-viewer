@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Real Apex parsing, and pick what goes into the graph
+
+- **Apex is now parsed from a real syntax tree** (ANTLR `@apexdevtools/apex-parser`)
+  instead of regex. Class structure, method/instance calls, SOQL/DML targets, and
+  `implements`/generics are read accurately — e.g. a class implementing
+  `Database.Batchable<SObject>` is now correctly classified, and field references
+  are no longer mistaken for objects. The previous regex parser stays on as an
+  automatic fallback for any `.cls` the grammar can't cleanly parse.
+- **Choose which source types to build** when generating a graph. A multi-select
+  prompt (everything on by default, your last choice remembered) lets you scope the
+  graph to just the metadata types you care about — handy for large orgs.
+
 ## 0.6.2
 
 - Add a branded extension icon — shown on the Marketplace listing and the activity-bar.

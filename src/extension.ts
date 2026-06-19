@@ -1,6 +1,7 @@
 import * as path from "path";
 import { Worker } from "worker_threads";
 import * as vscode from "vscode";
+import { GROUP_CATALOG } from "./builder/groupCatalog";
 import { normalizeGraph } from "./graph/validate";
 import { GraphEntry, GraphLibrary, GraphLibraryProvider } from "./library";
 import { GraphPanel } from "./panel";
@@ -72,6 +73,8 @@ export function activate(context: vscode.ExtensionContext): void {
               })
             )?.[0];
       if (!folder) return;
+      const include = await pickSourceTypes(context);
+      if (!include) return; // cancelled, or nothing selected
       try {
         const started = Date.now();
         let timings: BuildTimings | undefined;
@@ -83,7 +86,7 @@ export function activate(context: vscode.ExtensionContext): void {
           },
           async (progress, token) => {
             let lastPct = 0;
-            const result = await runBuildWorker(context, folder.fsPath, token, (p) => {
+            const result = await runBuildWorker(context, folder.fsPath, include, token, (p) => {
               if (p.phase === "extract" && p.total > 0) {
                 const pct = Math.floor((p.done / p.total) * 100);
                 progress.report({
@@ -169,6 +172,7 @@ interface BuildProgress {
 function runBuildWorker(
   context: vscode.ExtensionContext,
   root: string,
+  include: string[],
   token: vscode.CancellationToken,
   onProgress?: (p: BuildProgress) => void,
 ): Promise<{ graph: unknown; timings?: BuildTimings } | undefined> {
@@ -196,8 +200,35 @@ function runBuildWorker(
       },
     );
     worker.once("error", (err) => finish(() => reject(err)));
-    worker.postMessage(root);
+    worker.postMessage({ root, include });
   });
+}
+
+/** Multi-select picker for which metadata source types to build nodes from.
+ *  Defaults to the last selection (all types on first run). Returns the chosen
+ *  catalog keys, or `undefined` if cancelled or nothing was selected. */
+async function pickSourceTypes(context: vscode.ExtensionContext): Promise<string[] | undefined> {
+  const allKeys = GROUP_CATALOG.map((g) => g.key);
+  const last = context.workspaceState.get<string[]>("graphViewer.lastSourceTypes");
+  const preselected = new Set(last && last.length ? last : allKeys);
+  const items: Array<vscode.QuickPickItem & { key: string }> = GROUP_CATALOG.map((g) => ({
+    label: g.label,
+    key: g.key,
+    picked: preselected.has(g.key),
+  }));
+  const chosen = await vscode.window.showQuickPick(items, {
+    canPickMany: true,
+    title: "Source types to include in the graph",
+    placeHolder: "Toggle which metadata types to build nodes from — all on by default",
+  });
+  if (!chosen) return undefined; // cancelled
+  if (chosen.length === 0) {
+    void vscode.window.showWarningMessage("Graph Viewer: select at least one source type to build.");
+    return undefined;
+  }
+  const keys = chosen.map((c) => c.key);
+  await context.workspaceState.update("graphViewer.lastSourceTypes", keys);
+  return keys;
 }
 
 function fmtDuration(ms: number): string {

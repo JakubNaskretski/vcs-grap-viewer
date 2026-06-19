@@ -203,7 +203,7 @@ function loopVarTypes(code: string): Record<string, string> {
   return out;
 }
 
-class ApexExtractor implements Extractor {
+export class ApexExtractor implements Extractor {
   source = "salesforce";
 
   handles(filePath: string): boolean {
