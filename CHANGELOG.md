@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.7.1
+
+### Faster, more reliable graph builds
+
+- **Building a graph from a large org no longer stalls.** Apex classes are now parsed
+  with a faster strategy that avoids a slowdown which could leave a build stuck partway
+  through on big or generated `.cls` files. Accuracy is unchanged.
+- **A build that hits trouble no longer hangs silently.** If a background worker runs out
+  of memory or crashes, the build now recovers or fails clearly instead of freezing the
+  progress bar.
+- **New "Debug" setting** (`graphViewer.debug`, off by default). When on, the Graph Explorer
+  output channel reports any file that's slow to parse — useful for pinning down what's
+  slowing a large build.
+
 ## 0.7.0
 
 ### Real Apex parsing, and pick what goes into the graph

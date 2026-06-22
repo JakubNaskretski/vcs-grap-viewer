@@ -2,7 +2,7 @@
   "name": "vcs-graph-viewer",
   "displayName": "Graph Explorer",
   "description": "Visualize and explore a metadata graph (nodes + edges) as an interactive, filterable map — an Obsidian-style graph view inside your editor.",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "publisher": "Skrety",
   "icon": "plugin-icon.png",
   "license": "MIT",
@@ -189,6 +189,11 @@
           "default": 1500,
           "minimum": 100,
           "description": "Hard cap on how many nodes the map renders at once. When a view (even the container overview) exceeds this, only the most-connected nodes are drawn — search and drill-in still reach everything. \"Show all\" bypasses the cap after its confirmation."
+        },
+        "graphViewer.debug": {
+          "type": "boolean",
+          "default": false,
+          "description": "Log build diagnostics to the Graph Explorer output channel: any file whose extraction is unusually slow (with its path and parse time) and worker crashes. Turn on to find files that bog down or stall a 'Generate from folder' build."
         }
       }
     }

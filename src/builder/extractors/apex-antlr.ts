@@ -122,7 +122,24 @@ function resolveOperandNode(opNode: PNode, symbols: Record<string, string>): str
   return mvar ? symbols[mvar[1]] ?? "" : "";
 }
 
-function parseApex(src: string): { tree: PNode; errors: number } {
+// antlr PredictionMode constants. Not re-exported by apex-parser, but stable
+// since antlr4's inception: SLL=0 (near-linear, no full-context lookahead),
+// LL=1 (full ALL(*)). The parser ships defaulting to LL — that full-context
+// prediction is the part that goes super-linear and silently wedges the worker
+// for minutes on a single large generated .cls (WSDL2Apex output, a giant static
+// Map literal, deeply nested expressions). SLL never enters full context, so it
+// cannot blow up; per antlr's documented two-stage contract it is correct
+// whenever it reports no syntax error.
+const PRED_SLL = 0;
+const PRED_LL = 1;
+// The LL escalation only ever runs for a file SLL already flagged as malformed.
+// Bound it: a huge malformed file isn't worth a possibly multi-minute full-context
+// parse, so above this size we keep the SLL result (errors>0) and let extract()
+// drop it to the regex baseline. Valid files never reach the retry (SLL returns
+// errors=0), so this costs zero AST precision on anything parseable.
+const LL_RETRY_MAX_CHARS = 200_000;
+
+function parseOnce(src: string, predictionMode: number): { tree: PNode; errors: number } {
   const lexer = ApexParserFactory.createLexer(src);
   // removeErrorListeners() on BOTH lexer and parser is load-bearing, not hygiene:
   // antlr seeds every recognizer with a ConsoleErrorListener that writes each
@@ -132,6 +149,10 @@ function parseApex(src: string): { tree: PNode; errors: number } {
   const tokens = ApexParserFactory.createTokenStream(lexer);
   const parser = new ApexParser(tokens);
   parser.removeErrorListeners();
+  // `.predictionMode` is a number at runtime; the bundled d.ts types it as the
+  // PredictionMode class, hence the cast. `_interp` exists immediately after
+  // construction (set in the generated ApexParser constructor).
+  (parser as unknown as { _interp: { predictionMode: number } })._interp.predictionMode = predictionMode;
   let errors = 0;
   parser.addErrorListener({
     syntaxError: () => {
@@ -143,6 +164,18 @@ function parseApex(src: string): { tree: PNode; errors: number } {
   } as never);
   const tree = parser.compilationUnit();
   return { tree, errors };
+}
+
+/** Parse SLL-first; escalate to full LL only when SLL flags an error, so the
+ *  common case (any valid class, however large) takes the fast near-linear path
+ *  with a complete AST. A genuinely malformed file errors under both modes and
+ *  the caller drops it to the regex baseline. The LL retry is size-capped so a
+ *  huge malformed file can't wedge the worker on a multi-minute full-context
+ *  parse — only small malformed files (bounded LL cost) ever reach it. */
+function parseApex(src: string): { tree: PNode; errors: number } {
+  const sll = parseOnce(src, PRED_SLL);
+  if (sll.errors === 0 || src.length > LL_RETRY_MAX_CHARS) return sll;
+  return parseOnce(src, PRED_LL);
 }
 
 const DML_STATEMENTS = ["InsertStatement", "UpdateStatement", "DeleteStatement", "UpsertStatement", "UndeleteStatement"];

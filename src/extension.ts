@@ -75,6 +75,8 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!folder) return;
       const include = await pickSourceTypes(context);
       if (!include) return; // cancelled, or nothing selected
+      const debug = vscode.workspace.getConfiguration("graphViewer").get<boolean>("debug", false);
+      if (debug) log.show(true); // bring the diagnostics channel forward
       try {
         const started = Date.now();
         let timings: BuildTimings | undefined;
@@ -86,19 +88,27 @@ export function activate(context: vscode.ExtensionContext): void {
           },
           async (progress, token) => {
             let lastPct = 0;
-            const result = await runBuildWorker(context, folder.fsPath, include, token, (p) => {
-              if (p.phase === "extract" && p.total > 0) {
-                const pct = Math.floor((p.done / p.total) * 100);
-                progress.report({
-                  message: `extracting ${p.done.toLocaleString()}/${p.total.toLocaleString()} files`,
-                  increment: pct - lastPct,
-                });
-                lastPct = pct;
-              } else if (p.phase === "resolve") {
-                progress.report({ message: "resolving references…", increment: 100 - lastPct });
-                lastPct = 100;
-              }
-            });
+            const result = await runBuildWorker(
+              context,
+              folder.fsPath,
+              include,
+              debug,
+              token,
+              (p) => {
+                if (p.phase === "extract" && p.total > 0) {
+                  const pct = Math.floor((p.done / p.total) * 100);
+                  progress.report({
+                    message: `extracting ${p.done.toLocaleString()}/${p.total.toLocaleString()} files`,
+                    increment: pct - lastPct,
+                  });
+                  lastPct = pct;
+                } else if (p.phase === "resolve") {
+                  progress.report({ message: "resolving references…", increment: 100 - lastPct });
+                  lastPct = 100;
+                }
+              },
+              (file, ms) => log.appendLine(`[debug] slow extract — ${ms.toLocaleString()}ms — ${file}`),
+            );
             if (result === undefined) return undefined; // cancelled
             timings = result.timings;
             return library.add(path.basename(folder.fsPath), normalizeGraph(result.graph), folder.fsPath);
@@ -173,8 +183,10 @@ function runBuildWorker(
   context: vscode.ExtensionContext,
   root: string,
   include: string[],
+  debug: boolean,
   token: vscode.CancellationToken,
   onProgress?: (p: BuildProgress) => void,
+  onSlow?: (file: string, ms: number) => void,
 ): Promise<{ graph: unknown; timings?: BuildTimings } | undefined> {
   return new Promise((resolve, reject) => {
     const workerPath = vscode.Uri.joinPath(context.extensionUri, "dist", "builder.worker.js").fsPath;
@@ -189,9 +201,23 @@ function runBuildWorker(
     token.onCancellationRequested(() => finish(() => resolve(undefined)));
     worker.on(
       "message",
-      (msg: { type?: string; ok?: boolean; graph?: unknown; error?: string; timings?: BuildTimings } & Partial<BuildProgress>) => {
+      (
+        msg: {
+          type?: string;
+          ok?: boolean;
+          graph?: unknown;
+          error?: string;
+          timings?: BuildTimings;
+          file?: string;
+          ms?: number;
+        } & Partial<BuildProgress>,
+      ) => {
         if (msg.type === "progress") {
           if (!settled && msg.phase) onProgress?.({ phase: msg.phase, done: msg.done ?? 0, total: msg.total ?? 0 });
+          return;
+        }
+        if (msg.type === "slow") {
+          if (!settled) onSlow?.(msg.file ?? "?", msg.ms ?? 0);
           return;
         }
         finish(() =>
@@ -200,7 +226,13 @@ function runBuildWorker(
       },
     );
     worker.once("error", (err) => finish(() => reject(err)));
-    worker.postMessage({ root, include });
+    // Coordinator parity with its own child workers: a hard crash that emits no
+    // message and no 'error' would otherwise hang this promise (and the build UI)
+    // forever. A non-zero exit is a build failure.
+    worker.once("exit", (code) => {
+      if (code !== 0) finish(() => reject(new Error(`build worker exited (code ${code})`)));
+    });
+    worker.postMessage({ root, include, debug });
   });
 }
 

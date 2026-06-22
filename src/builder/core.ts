@@ -5,6 +5,10 @@
 import * as path from "path";
 import { RawEdge, RawNode } from "./model";
 
+// A single file taking this long to extract is the kind of outlier a debug build
+// should surface (e.g. a huge generated .cls). Diagnostic only — never alters output.
+const SLOW_FILE_MS = 1000;
+
 export interface Extractor {
   source: string;
   handles(filePath: string): boolean;
@@ -59,8 +63,14 @@ export class GraphBuilder {
     return this.resolve(registry, ex.pending, ex.errors);
   }
 
-  /** Pass 1 only. `onFile` is called after every file (handled or not) — progress. */
-  extract(files: string[], onFile?: (done: number) => void): ExtractResult {
+  /** Pass 1 only. `onFile` is called after every file (handled or not) — progress.
+   *  `onSlow` (debug only) fires for any single file whose extraction takes at
+   *  least SLOW_FILE_MS — the diagnostic for a build that bogs down on one file. */
+  extract(
+    files: string[],
+    onFile?: (done: number) => void,
+    onSlow?: (file: string, ms: number) => void,
+  ): ExtractResult {
     const registry = new Map<string, RawNode>();
     const pending: RawEdge[] = [];
     const errors: BuildResult["errors"] = [];
@@ -73,6 +83,7 @@ export class GraphBuilder {
         continue;
       }
       let result: [RawNode[], RawEdge[]];
+      const startedAt = onSlow ? Date.now() : 0;
       try {
         result = extractor.extract(file);
       } catch (err) {
@@ -83,6 +94,10 @@ export class GraphBuilder {
         });
         onFile?.(++done);
         continue;
+      }
+      if (onSlow) {
+        const ms = Date.now() - startedAt;
+        if (ms >= SLOW_FILE_MS) onSlow(file, ms);
       }
       const [nodes, edges] = result;
       for (const n of nodes ?? []) {

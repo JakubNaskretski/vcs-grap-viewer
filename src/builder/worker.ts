@@ -28,24 +28,31 @@ interface ProgressMsg {
   total: number;
 }
 
-/** Coordinator request: a root to build, plus the optional source-type filter. */
+/** Coordinator request: a root to build, the optional source-type filter, and
+ *  whether to stream per-file debug diagnostics up to the extension. */
 interface BuildRequest {
   root: string;
   include?: string[];
+  debug?: boolean;
 }
 
 // ---- extract child: pass 1 over one chunk ----------------------------------
 if (workerData?.role === "extract") {
   const include = (workerData?.include as string[] | undefined) ?? undefined;
+  const debug = workerData?.debug === true;
   parentPort?.on("message", (files: string[]) => {
     try {
       let lastSent = 0;
-      const result = makeBuilder({ include }).extract(files, (done) => {
-        if (done - lastSent >= PROGRESS_EVERY || done === files.length) {
-          lastSent = done;
-          parentPort?.postMessage({ type: "progress", done });
-        }
-      });
+      const result = makeBuilder({ include }).extract(
+        files,
+        (done) => {
+          if (done - lastSent >= PROGRESS_EVERY || done === files.length) {
+            lastSent = done;
+            parentPort?.postMessage({ type: "progress", done });
+          }
+        },
+        debug ? (file, ms) => parentPort?.postMessage({ type: "slow", file, ms }) : undefined,
+      );
       parentPort?.postMessage({ type: "done", result });
     } catch (err) {
       parentPort?.postMessage({ type: "error", error: (err as Error).message });
@@ -56,20 +63,21 @@ if (workerData?.role === "extract") {
 // ---- coordinator: walk -> parallel extract -> resolve -----------------------
 else {
   parentPort?.on("message", (req: BuildRequest | string) => {
-    // Back-compat: a bare string is still accepted as the root (no type filter).
-    const { root, include } = typeof req === "string" ? { root: req, include: undefined } : req;
-    void coordinate(root, include);
+    // Back-compat: a bare string is still accepted as the root (no filter, no debug).
+    const { root, include, debug } =
+      typeof req === "string" ? { root: req, include: undefined, debug: false } : req;
+    void coordinate(root, include, debug);
   });
 }
 
-async function coordinate(root: string, include?: string[]): Promise<void> {
+async function coordinate(root: string, include?: string[], debug?: boolean): Promise<void> {
   try {
     const t0 = Date.now();
     const files = walkFiles(root);
     const tWalk = Date.now();
     progress({ type: "progress", phase: "extract", done: 0, total: files.length });
 
-    const chunks = await extractAll(files, include);
+    const chunks = await extractAll(files, include, debug);
     const tExtract = Date.now();
     progress({ type: "progress", phase: "resolve", done: 0, total: 0 });
 
@@ -102,26 +110,30 @@ async function coordinate(root: string, include?: string[]): Promise<void> {
 }
 
 /** Pass 1 over all files: parallel when it pays off, sequential otherwise. */
-async function extractAll(files: string[], include?: string[]): Promise<ExtractResult[]> {
+async function extractAll(files: string[], include?: string[], debug?: boolean): Promise<ExtractResult[]> {
   if (files.length >= PARALLEL_THRESHOLD && MAX_WORKERS > 1) {
     try {
-      return await extractParallel(files, include);
+      return await extractParallel(files, include, debug);
     } catch {
       // worker spin-up failed (restricted env?) — fall through to sequential
     }
   }
   let lastSent = 0;
   return [
-    makeBuilder({ include }).extract(files, (done) => {
-      if (done - lastSent >= PROGRESS_EVERY || done === files.length) {
-        lastSent = done;
-        progress({ type: "progress", phase: "extract", done, total: files.length });
-      }
-    }),
+    makeBuilder({ include }).extract(
+      files,
+      (done) => {
+        if (done - lastSent >= PROGRESS_EVERY || done === files.length) {
+          lastSent = done;
+          progress({ type: "progress", phase: "extract", done, total: files.length });
+        }
+      },
+      debug ? (file, ms) => parentPort?.postMessage({ type: "slow", file, ms }) : undefined,
+    ),
   ];
 }
 
-function extractParallel(files: string[], include?: string[]): Promise<ExtractResult[]> {
+function extractParallel(files: string[], include?: string[], debug?: boolean): Promise<ExtractResult[]> {
   const chunkSize = Math.ceil(files.length / MAX_WORKERS);
   const chunks: string[][] = [];
   for (let i = 0; i < files.length; i += chunkSize) chunks.push(files.slice(i, i + chunkSize));
@@ -135,28 +147,64 @@ function extractParallel(files: string[], include?: string[]): Promise<ExtractRe
       total: files.length,
     });
 
+  // Track every spawned child so a single chunk failure can tear the rest down.
+  // Without this, when one child crashes, Promise.all rejects and extractAll
+  // degrades to a full sequential rebuild — but the surviving siblings keep
+  // extracting in parallel WITH that rebuild, doubling CPU/RAM at the worst
+  // possible moment (a crash is usually memory pressure).
+  const children: Worker[] = [];
   return Promise.all(
     chunks.map(
       (chunk, i) =>
         new Promise<ExtractResult>((resolve, reject) => {
-          const child = new Worker(__filename, { workerData: { role: "extract", include } });
-          child.on("message", (msg: { type: string; done?: number; result?: ExtractResult; error?: string }) => {
-            if (msg.type === "progress") {
-              doneByChunk[i] = msg.done ?? 0;
-              report();
-            } else if (msg.type === "done" && msg.result) {
-              void child.terminate();
-              resolve(msg.result);
-            } else if (msg.type === "error") {
-              void child.terminate();
-              reject(new Error(msg.error ?? "extract worker failed"));
-            }
+          const child = new Worker(__filename, { workerData: { role: "extract", include, debug } });
+          children.push(child);
+          // Settle exactly once: terminate() fires a later 'exit' (code 1) that
+          // would otherwise re-enter the exit handler below after we're done.
+          let settled = false;
+          const ok = (r: ExtractResult) => {
+            if (settled) return;
+            settled = true;
+            void child.terminate();
+            resolve(r);
+          };
+          const fail = (e: Error) => {
+            if (settled) return;
+            settled = true;
+            void child.terminate();
+            reject(e);
+          };
+          child.on(
+            "message",
+            (msg: { type: string; done?: number; result?: ExtractResult; error?: string; file?: string; ms?: number }) => {
+              if (msg.type === "progress") {
+                doneByChunk[i] = msg.done ?? 0;
+                report();
+              } else if (msg.type === "slow") {
+                parentPort?.postMessage({ type: "slow", file: msg.file, ms: msg.ms });
+              } else if (msg.type === "done" && msg.result) {
+                ok(msg.result);
+              } else if (msg.type === "error") {
+                fail(new Error(msg.error ?? "extract worker failed"));
+              }
+            },
+          );
+          child.once("error", fail);
+          // A child that dies (OOM / hard crash) without a done/error message would
+          // otherwise leave this promise — and the whole Promise.all — pending
+          // forever, freezing the build at a partial count. Treat a non-zero exit
+          // as a chunk failure; extractAll then degrades to the sequential path.
+          child.once("exit", (code) => {
+            if (code !== 0) fail(new Error(`extract worker exited (code ${code})`));
           });
-          child.once("error", reject);
           child.postMessage(chunk);
         }),
     ),
-  );
+  ).finally(() => {
+    // No-op on success (each child already self-terminated in ok()); on failure
+    // this reaps the orphaned siblings so the sequential fallback runs alone.
+    for (const c of children) void c.terminate();
+  });
 }
 
 function progress(msg: ProgressMsg): void {
