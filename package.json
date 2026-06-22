@@ -2,7 +2,7 @@
   "name": "vcs-graph-viewer",
   "displayName": "Graph Explorer",
   "description": "Visualize and explore a metadata graph (nodes + edges) as an interactive, filterable map — an Obsidian-style graph view inside your editor.",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "publisher": "Skrety",
   "icon": "plugin-icon.png",
   "license": "MIT",
@@ -55,6 +55,12 @@
         "title": "Open Graph",
         "category": "Graph Explorer",
         "icon": "$(open-preview)"
+      },
+      {
+        "command": "graphViewer.renameStored",
+        "title": "Rename Graph",
+        "category": "Graph Explorer",
+        "icon": "$(edit)"
       },
       {
         "command": "graphViewer.deleteStored",
@@ -136,9 +142,14 @@
           "group": "navigation@1"
         },
         {
-          "command": "graphViewer.deleteStored",
+          "command": "graphViewer.renameStored",
           "when": "view == graphViewer.library && viewItem == graphEntry",
           "group": "inline@1"
+        },
+        {
+          "command": "graphViewer.deleteStored",
+          "when": "view == graphViewer.library && viewItem == graphEntry",
+          "group": "inline@2"
         }
       ]
     },

@@ -10,6 +10,10 @@ export interface DetailCtx {
   /** What's available to reveal around this node and how much is revealed now (from
    *  the host). Absent until the host answers the `describe` request. */
   explore?: { totals: ExploreTotals; spec: ExploreSpec };
+  /** Focus state (flat view only): the depth + direction of the neighborhood scope
+   *  and whether unrelated nodes are faded (webview) or hidden (host-culled).
+   *  Present only when Focus is on, driving the Focus block's controls. */
+  focus?: { depth: number; direction: "out" | "in" | "both"; mode: "fade" | "hide" };
 }
 
 /** Build the detail-panel HTML for one node: header, attributes, relationships. */
@@ -35,6 +39,10 @@ export function renderDetail(graph: Graph, byId: Map<string, GraphNode>, id: str
   // onto the current map. Only in the container view, and only once the host has
   // reported what's available (ctx.explore).
   parts.push(renderExplore(ctx));
+
+  // Focus (flat view): scope the map to this node's N-hop neighborhood. The depth
+  // stepper grows/shrinks the lit set; direction picks outgoing / incoming / both.
+  parts.push(renderFocus(ctx));
 
   // Attributes — everything beyond the core fields, generically rendered.
   const attrs: string[] = [];
@@ -94,6 +102,27 @@ function renderExplore(ctx?: DetailCtx): string {
   return `<section class="d-section x-explore"><h3>Explore</h3>${rows.join("")}</section>`;
 }
 
+// The "Focus" block: a depth stepper (−/＋, min 0) + a direction toggle. Buttons
+// carry data-focus the webview reads to re-scope the neighborhood (no host round-trip
+// in fade mode). Only rendered when Focus is on (ctx.focus present).
+function renderFocus(ctx?: DetailCtx): string {
+  if (!ctx?.focus) return "";
+  const { depth, direction, mode } = ctx.focus;
+  const minus = `<button class="x-step" data-focus="depth" data-dir="-1"${depth <= 0 ? " disabled" : ""} title="Fewer hops">−</button>`;
+  const plus = `<button class="x-step" data-focus="depth" data-dir="1" title="More hops">＋</button>`;
+  const dir = (d: "out" | "in" | "both") =>
+    `<button class="x-toggle${direction === d ? " on" : ""}" data-focus="dir" data-dir="${d}" title="${d === "out" ? "What this calls/uses" : d === "in" ? "What calls/uses this" : "Both directions"}">${d}</button>`;
+  const scope = (m: "fade" | "hide", lbl: string, tip: string) =>
+    `<button class="x-toggle${mode === m ? " on" : ""}" data-focus="mode" data-dir="${m}" title="${tip}">${lbl}</button>`;
+  return (
+    `<section class="d-section x-explore"><h3>Focus</h3>` +
+    `<div class="x-row"><span class="x-label">Depth</span><span class="x-stepper">${minus}<span class="x-count">${depth} ${depth === 1 ? "hop" : "hops"}</span>${plus}</span></div>` +
+    `<div class="x-row"><span class="x-label">Direction</span><span class="x-stepper">${dir("out")}${dir("in")}${dir("both")}</span></div>` +
+    `<div class="x-row"><span class="x-label">Scope</span><span class="x-stepper">${scope("fade", "fade rest", "Dim everything outside the neighborhood — keeps context; best when the graph already fits")}${scope("hide", "only this", "Render only the neighborhood and cull the rest — the way to explore a huge graph")}</span></div>` +
+    `</section>`
+  );
+}
+
 function stepper(label: string, kind: string, shown: number, total: number): string {
   const minus = `<button class="x-step" data-kind="${kind}" data-dir="-1"${shown <= 0 ? " disabled" : ""} title="Show fewer">−</button>`;
   const plus = `<button class="x-step" data-kind="${kind}" data-dir="1"${shown >= total ? " disabled" : ""} title="Show more">＋</button>`;
@@ -120,7 +149,10 @@ function renderGroups(map: Map<string, GraphNode[]>, label: (t: string) => strin
 }
 
 function nodeLink(n: GraphNode): string {
-  return `<a class="node-link" data-id="${esc(n.id)}" title="${esc(n.id)}"><span class="dot sm" style="background:${typeColor(n.type)}"></span>${esc(n.label)}</a>`;
+  // The section header already names the edge verb (Calls / Reads / Implements…);
+  // the trailing type tells you WHAT the other end is, so a row reads at a glance as
+  // "Calls → SyncAccount (apexclass)" / "References → Quote__c (object)".
+  return `<a class="node-link" data-id="${esc(n.id)}" title="${esc(n.id)}"><span class="dot sm" style="background:${typeColor(n.type)}"></span><span class="nl-name">${esc(n.label)}</span><span class="nl-type">${esc(n.type)}</span></a>`;
 }
 
 function renderAttr(key: string, value: unknown): string {

@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.8.0
+
+### Focus mode — explore huge graphs one node at a time
+
+- **Scope the map to a node and its neighborhood.** In the full view, turn on **Focus** to
+  zero in on a selected node. A depth control (− / ＋, starting at 0) grows or shrinks how
+  many hops out you see, and a direction toggle picks what it calls/uses (**out**), what
+  calls/uses it (**in**), or **both**. Choose **fade rest** to dim everything else while
+  keeping context, or **only this** to render just the neighborhood — so even a very large
+  org stays fast and legible instead of an unreadable hairball.
+- **Search jumps you there.** Searching while focused re-centers on the hit's neighborhood.
+- **See how and why nodes are linked.** Each related node in the detail panel now shows its
+  type — e.g. "Calls → SyncAccount (apexclass)", "References → Quote\_\_c (object)".
+
+### Name and organize your graphs
+
+- **Name a graph when you build it.** Generating from a folder now prompts for a name, with
+  a smart default (the project/org folder instead of a generic "main"/"default"), and you
+  can **rename** any saved graph later from the Graphs panel.
+- **See what a graph contains at a glance.** Each entry shows its node count and how many
+  source types it was built from; hover for the full type list, the source folder, and the
+  build date.
+
+### Fixes
+
+- **Apex: no more phantom method nodes.** A constructor-style call no longer creates a
+  stray, disconnected method node that showed up with no connections.
+
 ## 0.7.1
 
 ### Faster, more reliable graph builds

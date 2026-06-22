@@ -261,7 +261,11 @@ export class ApexAntlrExtractor implements Extractor {
       const cset = recv.match(/^(\w+__c)$/i);
       if (cset && /^(getinstance|getorgdefaults|getvalues)$/i.test(method)) sobj.add(cset[1]);
       const pascal = recv.match(/^([A-Z]\w*)$/);
-      if (pascal && pascal[1] !== cname) {
+      // `Recv.Recv()` is never a real static call (construction is `new Recv()`,
+      // handled via CreatedName). Without the `method !== pascal[1]` guard it would
+      // emit a phantom `calls -> apexmethod Recv.Recv` edge that resolve() then
+      // materializes as an orphan stub node (constructors aren't emitted as methods).
+      if (pascal && pascal[1] !== cname && method !== pascal[1]) {
         const key = `${pascal[1]}.${method}`;
         if (!seenQ.has(key)) {
           seenQ.add(key);

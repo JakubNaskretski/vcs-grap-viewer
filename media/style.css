@@ -534,6 +534,27 @@ button:hover {
   background: var(--vscode-list-hoverBackground);
 }
 
+/* Relationship row: name takes the space, the dim type tag sits at the right so a
+   row reads "Calls → SyncAccount   apexclass". */
+.nl-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nl-type {
+  flex: none;
+  opacity: 0.45;
+  font-size: 11px;
+}
+
+/* Active toggle state for the Focus button (and any mode-btn that latches on). */
+.mode-btn.on {
+  border-color: var(--vscode-focusBorder, #4c8dff);
+  color: var(--vscode-foreground);
+}
+
 .attr {
   display: flex;
   gap: 8px;

@@ -47,6 +47,9 @@ interface Meta {
   rootInfo?: { id: string; totals: ExploreTotals; spec: ExploreSpec };
   // How many nodes the maxRenderNodes cap dropped from this view (0 = uncapped).
   capDropped: number;
+  // Present in flat-view hide-focus: the rendered K-hop neighborhood's root + size,
+  // so the focus pill can show "+N beyond cap".
+  focusInfo?: { root: string; depth: number; direction: string; total: number; shown: number };
 }
 
 const accent =
@@ -70,6 +73,10 @@ const edgeFiltersEl = $<HTMLDivElement>("#edge-filters");
 const searchEl = $<HTMLInputElement>("#search");
 const statusEl = $<HTMLSpanElement>("#status");
 const modeEl = $<HTMLButtonElement>("#mode");
+const focusEl = $<HTMLButtonElement>("#focus");
+const focusBarEl = $<HTMLSpanElement>("#focus-bar");
+const focusLabelEl = $<HTMLSpanElement>("#focus-label");
+const focusClearEl = $<HTMLButtonElement>("#focus-clear");
 const exploreBarEl = $<HTMLSpanElement>("#explore-bar");
 const exploreCountEl = $<HTMLSpanElement>("#explore-count");
 const exploreResetEl = $<HTMLButtonElement>("#explore-reset");
@@ -111,6 +118,19 @@ let selSet: Set<string> | undefined; // selected node + its neighbors (label-on)
 let selEdges: Set<string> | undefined; // edges incident to the selection (accent)
 let searchTerm = ""; // lowercased; non-matching nodes dim
 
+// Focus mode (flat 'all' view only — the inverse of the container-only Explore):
+// scope to a root node, grow its visible neighborhood by `depth` hops in a chosen
+// direction, and fade (or, in hide mode, host-cull) everything else. When active,
+// selecting a node re-roots the focus.
+interface FocusState {
+  active: boolean;
+  rootId: string | undefined;
+  depth: number; // 0 = root only, 1 = direct neighbors, …
+  direction: "out" | "in" | "both";
+  mode: "fade" | "hide";
+}
+let focusState: FocusState = { active: false, rootId: undefined, depth: 1, direction: "both", mode: "fade" };
+
 // Layout mode: "force" = force-directed (forceAtlas2); "grouped" = one island per
 // node type. Grouped trades intra-group connectivity for clean separation by color.
 type LayoutMode = "force" | "grouped";
@@ -147,8 +167,20 @@ window.addEventListener("message", (event) => {
     currentMeta = m.meta;
     graph = m.graph;
     build(graph); // resets selectedInfo, so adopt the host's rootInfo AFTER it (below)
+    // A fresh/reset graph (reload, view-mode switch) arrives with NO echoed node and
+    // means the host has cleared its focus — clear ours too, or it leaks into the
+    // container view. A focus round-trip (setFocus/clearFocus) echoes expandRoot, so
+    // focusState is kept and select(expandRoot) below re-scopes correctly.
+    if (!m.expandRoot) {
+      focusState.active = false;
+      focusState.rootId = undefined;
+    }
+    // The host is culling (hide-focus): adopt its root so the select(expandRoot) below
+    // doesn't see a stale root and post a redundant re-cull (e.g. after a search re-root).
+    if (m.meta?.focusInfo) focusState.rootId = m.meta.focusInfo.root;
     updateModeUI();
     updateExploreUI();
+    updateFocusUI();
     // Keep the just-acted node selected so its detail (and Explore block) stays open;
     // adopt the host's echoed reveal info so the block shows the new counts.
     if (m.expandRoot && byId.has(m.expandRoot)) {
@@ -194,6 +226,62 @@ function updateModeUI(): void {
     modeEl.textContent = "Collapse to containers";
     modeEl.title = "Roll fields/methods/elements up into their parent objects/classes/flows";
     modeEl.dataset.target = "containers";
+  }
+}
+
+// ---- focus (flat-view node governance) ----
+focusEl.addEventListener("click", () => setFocusActive(!focusState.active));
+focusClearEl.addEventListener("click", () => setFocusActive(false));
+
+function setFocusActive(on: boolean): void {
+  if (on && !selectedId) return; // no root to scope to — ignore the toggle
+  focusState.active = on;
+  focusState.rootId = on ? selectedId : undefined;
+  if (on && focusState.mode === "hide" && selectedId) {
+    postFocus(); // host culls to the neighborhood -> setGraph re-selects the root
+  } else if (!on && focusState.mode === "hide") {
+    vscodeApi.postMessage({ type: "clearFocus" }); // host restores the full 'all' graph
+  } else if (selectedId) {
+    select(selectedId); // fade on/off is purely local
+  } else {
+    updateFocusUI();
+    refresh();
+  }
+}
+
+/** Ask the host to (re)cull to the focused node's K-hop neighborhood (hide mode). */
+function postFocus(): void {
+  if (focusState.rootId) {
+    vscodeApi.postMessage({
+      type: "setFocus",
+      id: focusState.rootId,
+      depth: focusState.depth,
+      direction: focusState.direction,
+    });
+  }
+}
+
+// Focus is the inverse of Explore's gate: it applies in the flat ('all') view, where
+// Explore is hidden. Hidden entirely in the container overview.
+function updateFocusUI(): void {
+  const flat = currentMeta?.mode === "all";
+  focusEl.hidden = !flat;
+  // Focus needs a node to scope to; disable the toggle until one is selected so the
+  // affordance matches setFocusActive's guard.
+  focusEl.disabled = !focusState.active && !selectedId;
+  focusEl.classList.toggle("on", focusState.active);
+  focusEl.textContent = focusState.active ? "Focus: on" : "Focus";
+  const showBar = flat && focusState.active && !!focusState.rootId;
+  focusBarEl.hidden = !showBar;
+  if (showBar && focusState.rootId) {
+    const label = byId.get(focusState.rootId)?.label ?? focusState.rootId;
+    const hops = focusState.depth === 1 ? "1 hop" : `${focusState.depth} hops`;
+    let txt = `${label} · ${hops} · ${focusState.direction}`;
+    const fi = currentMeta?.focusInfo;
+    if (focusState.mode === "hide" && fi && fi.total > fi.shown) {
+      txt += ` · +${(fi.total - fi.shown).toLocaleString()} beyond cap`;
+    }
+    focusLabelEl.textContent = txt;
   }
 }
 
@@ -357,6 +445,18 @@ function nodeReducer(node: string, data: Record<string, unknown>): Partial<NodeD
     } else if (selSet?.has(node)) {
       res.forceLabel = true;
       res.zIndex = 1;
+    } else if (
+      focusState.active &&
+      focusState.mode === "fade" &&
+      currentMeta?.mode === "all" &&
+      !(searchTerm && String(data.label ?? "").toLowerCase().includes(searchTerm))
+    ) {
+      // Focus fade: everything outside the scoped neighborhood recedes into the
+      // background (same dark-grey dim the hover branch uses — opaque, not alpha).
+      // A live search hit is exempt so it stays findable while focused.
+      res.color = NODE_DIM;
+      res.label = "";
+      res.zIndex = 0;
     }
   }
   // Search dims non-matches (independent of selection).
@@ -378,6 +478,9 @@ function edgeReducer(edge: string, data: Record<string, unknown>): Partial<EdgeD
     return { color: EDGE_DIM, zIndex: 0 };
   }
   if (selEdges?.has(edge)) return { color: accent, size: 2, zIndex: 1 };
+  // Focus fade: edges leaving the scoped neighborhood recede with the nodes.
+  if (focusState.active && focusState.mode === "fade" && currentMeta?.mode === "all" && selectedId)
+    return { color: EDGE_DIM, zIndex: 0 };
   return {};
 }
 
@@ -752,15 +855,66 @@ function offHover(): void {
 }
 
 // ---- selection ----
+// BFS the model from `id` out to `depth` hops in `dir`. depth 0 = root only; 1 =
+// root + direct neighbors (the default selection); N = N hops. Direction picks
+// outgoing ("what this calls/uses"), incoming ("what calls/uses this"), or both.
+function nHop(m: Graphology, id: string, depth: number, dir: "out" | "in" | "both"): Set<string> {
+  const seen = new Set<string>([id]);
+  let frontier = [id];
+  const step = (n: string): string[] =>
+    dir === "out" ? m.outNeighbors(n) : dir === "in" ? m.inNeighbors(n) : m.neighbors(n);
+  for (let d = 0; d < depth && frontier.length; d++) {
+    const next: string[] = [];
+    for (const n of frontier) {
+      for (const nb of step(n)) {
+        if (!seen.has(nb)) {
+          seen.add(nb);
+          next.push(nb);
+        }
+      }
+    }
+    frontier = next;
+  }
+  return seen;
+}
+
+/** Every edge with BOTH endpoints inside `ids` — the lines internal to a focus set. */
+function edgesWithin(m: Graphology, ids: Set<string>): Set<string> {
+  const out = new Set<string>();
+  for (const id of ids) {
+    for (const e of m.edges(id)) {
+      if (ids.has(m.source(e)) && ids.has(m.target(e))) out.add(e);
+    }
+  }
+  return out;
+}
+
 function select(id: string): void {
   if (!model || !model.hasNode(id)) return;
   selectedId = id;
-  selSet = new Set<string>([id, ...model.neighbors(id)]);
-  selEdges = new Set<string>(model.edges(id));
+  // Focus only governs behavior in the flat view (the inverse of container Explore).
+  const focusActive = focusState.active && currentMeta?.mode === "all";
+  if (focusActive && focusState.mode === "hide" && focusState.rootId !== id) {
+    // Re-root hide-focus: re-cull host-side to the new root rather than scoping over
+    // the stale (old-root) slice. The host echoes expandRoot=id, re-invoking select();
+    // by then rootId === id so we fall through to the nHop branch — no post loop.
+    focusState.rootId = id;
+    postFocus();
+    return;
+  }
+  if (focusActive) {
+    focusState.rootId = id; // selecting a node re-roots the focus
+    selSet = nHop(model, id, focusState.depth, focusState.direction);
+    selEdges = edgesWithin(model, selSet);
+  } else {
+    selSet = new Set<string>([id, ...model.neighbors(id)]);
+    selEdges = new Set<string>(model.edges(id));
+  }
   refresh();
   // Drop stale Explore info unless the host just sent it for this exact node.
   if (selectedInfo?.id !== id) selectedInfo = undefined;
   renderDetailForSelection();
+  updateFocusUI();
   // Ask the host what's available to reveal around this node (container view only).
   if (currentMeta?.mode === "containers") vscodeApi.postMessage({ type: "describe", id });
 }
@@ -774,6 +928,10 @@ function renderDetailForSelection(): void {
     explore:
       selectedInfo && selectedInfo.id === selectedId
         ? { totals: selectedInfo.totals, spec: selectedInfo.spec }
+        : undefined,
+    focus:
+      focusState.active && currentMeta?.mode === "all"
+        ? { depth: focusState.depth, direction: focusState.direction, mode: focusState.mode }
         : undefined,
   });
 }
@@ -791,6 +949,10 @@ function clearSelection(): void {
   selectedInfo = undefined;
   refresh();
   clearDetail();
+  // Focus stays armed at the mode level (re-clicking a node re-scopes; in hide mode
+  // the host keeps the neighborhood). Reconcile the toolbar so its enabled/disabled
+  // state tracks the now-empty selection rather than going stale.
+  updateFocusUI();
 }
 
 function clearDetail(): void {
@@ -801,6 +963,29 @@ function clearDetail(): void {
 // neighbour/source steppers) and related-node links (recentre + select).
 detailEl.addEventListener("click", (e) => {
   const target = e.target as HTMLElement;
+  // Focus controls: depth stepper, direction toggle, fade/hide scope.
+  const focusBtn = target.closest("[data-focus]") as HTMLElement | null;
+  if (focusBtn?.dataset.focus && selectedId) {
+    e.preventDefault();
+    const kind = focusBtn.dataset.focus;
+    if (kind === "mode") {
+      const next = focusBtn.dataset.dir as "fade" | "hide";
+      if (next !== focusState.mode) {
+        focusState.mode = next;
+        // hide: ask the host to cull to the neighborhood; fade: drop the host cull and
+        // re-fade locally. Either way the host's setGraph re-selects the root.
+        if (next === "hide") postFocus();
+        else vscodeApi.postMessage({ type: "clearFocus" });
+      }
+      return;
+    }
+    if (kind === "depth") focusState.depth = Math.max(0, focusState.depth + Number(focusBtn.dataset.dir));
+    else if (kind === "dir") focusState.direction = focusBtn.dataset.dir as "out" | "in" | "both";
+    // hide mode re-culls host-side; fade mode re-scopes locally (select re-renders detail).
+    if (focusState.mode === "hide") postFocus();
+    else select(selectedId);
+    return;
+  }
   // Members toggle: reveal / collapse the selected node's children.
   const toggle = target.closest(".x-toggle") as HTMLElement | null;
   if (toggle?.dataset.kind && selectedId) {

@@ -1,7 +1,7 @@
 import * as path from "path";
 import * as vscode from "vscode";
 import { Graph } from "./graph/types";
-import { containerId, expandedView, exploreTotals, isNestedId, isNestedType, rollupToContainers, topConnectedSlice } from "./graph/rollup";
+import { containerId, expandedView, exploreTotals, isNestedId, isNestedType, neighborhood, rollupToContainers, topConnectedSlice } from "./graph/rollup";
 import type { ExploreSpec, ExploreTotals } from "./graph/rollup";
 import { GraphSource } from "./sources";
 
@@ -24,6 +24,14 @@ export class GraphPanel {
   // Per-node additive "Explore" reveals (container view only): for each explored
   // node, how much of its members / neighbours / sources to layer onto the overview.
   private explore = new Map<string, ExploreSpec>();
+  // Flat-view focus "hide" mode: render only the K-hop neighborhood of a root node,
+  // so a huge org is explorable without drawing every node. (Fade mode is webview-only
+  // and never reaches the host.)
+  private focus: { active: boolean; rootId?: string; depth: number; direction: "out" | "in" | "both" } = {
+    active: false,
+    depth: 1,
+    direction: "both",
+  };
   private webviewReady = false;
 
   static async createOrShow(context: vscode.ExtensionContext, source: GraphSource): Promise<void> {
@@ -109,6 +117,7 @@ export class GraphPanel {
       this.fullGraph = await this.source.load();
       this.rolledGraph = undefined;
       this.explore.clear(); // ids may have changed; start from the overview
+      this.focus.active = false;
       this.post();
     } catch (err) {
       void vscode.window.showErrorMessage(`Graph Explorer: ${(err as Error).message}`);
@@ -139,6 +148,8 @@ export class GraphPanel {
     query?: string;
     kind?: "members" | "neighbors" | "sources";
     value?: unknown;
+    depth?: number;
+    direction?: "out" | "in" | "both";
   }): void {
     if (msg?.type === "ready") {
       this.webviewReady = true;
@@ -155,7 +166,28 @@ export class GraphPanel {
       this.post();
     } else if (msg?.type === "find" && msg.query) {
       this.findInFullGraph(msg.query);
+    } else if (msg?.type === "setFocus" && msg.id) {
+      this.setFocus(msg.id, msg.depth, msg.direction);
+    } else if (msg?.type === "clearFocus") {
+      this.clearFocus();
     }
+  }
+
+  /** Enter (or re-scope) flat-view hide-focus: render only `id`'s K-hop neighborhood. */
+  private setFocus(id: string, depth?: number, direction?: "out" | "in" | "both"): void {
+    this.focus = {
+      active: true,
+      rootId: id,
+      depth: Math.max(0, Math.floor(Number(depth ?? this.focus.depth))),
+      direction: direction ?? this.focus.direction,
+    };
+    this.post(id);
+  }
+
+  private clearFocus(): void {
+    const root = this.focus.rootId; // echo it so the webview keeps the node selected
+    this.focus = { active: false, depth: this.focus.depth, direction: this.focus.direction };
+    this.post(root);
   }
 
   /** Tell the webview how much is available to reveal around `id` plus its current
@@ -205,6 +237,13 @@ export class GraphPanel {
       void this.panel.webview.postMessage({ type: "findResult", found: false, query });
       return;
     }
+    // In flat-view hide-focus, the rendered slice is only the current root's
+    // neighborhood, so a hit outside it can't be selected. Re-root focus onto the hit
+    // (its neighborhood is shipped, root pinned) instead of the container drill-in.
+    if (this.focus.active) {
+      this.setFocus(hit, this.focus.depth, this.focus.direction);
+      return;
+    }
     // Reveal the hit: expand the members of its container (or itself, if it's a main
     // node) so a nested hit becomes visible, and echo the hit id so the webview
     // selects it. Additive — the rest of the overview stays.
@@ -230,6 +269,7 @@ export class GraphPanel {
     }
     this.viewMode = mode;
     this.explore.clear(); // overview / full are their own thing; drop the drill-in
+    this.focus.active = false; // focus is flat-view + node-specific; a mode switch drops it
     this.post();
   }
 
@@ -240,10 +280,30 @@ export class GraphPanel {
     const total = this.fullGraph.nodes.length;
     const mode = this.viewMode === "auto" ? (total > BIG_GRAPH ? "containers" : "all") : this.viewMode;
     const exploring = mode === "containers" && this.explore.size > 0;
+    const focusing = mode === "all" && this.focus.active && !!this.focus.rootId;
     let graph = this.fullGraph;
     let capDropped = 0;
     let rootInfo: { id: string; totals: ExploreTotals; spec: ExploreSpec } | undefined;
-    if (mode === "containers") {
+    let focusInfo: { root: string; depth: number; direction: string; total: number; shown: number } | undefined;
+    if (focusing && this.focus.rootId) {
+      // Hide-focus: ship only the K-hop neighborhood of the root (capped), so the
+      // flat view is usable on a huge org without drawing every node.
+      const cap = Math.max(
+        100,
+        vscode.workspace.getConfiguration("graphViewer").get<number>("maxRenderNodes", 1500),
+      );
+      const nb = neighborhood(this.fullGraph, this.focus.rootId, this.focus.depth, this.focus.direction);
+      const sliced = topConnectedSlice(nb.graph, cap, cap * 4, this.focus.rootId);
+      capDropped = sliced.dropped;
+      graph = sliced.graph;
+      focusInfo = {
+        root: this.focus.rootId,
+        depth: this.focus.depth,
+        direction: this.focus.direction,
+        total: nb.total,
+        shown: sliced.graph.nodes.length,
+      };
+    } else if (mode === "containers") {
       this.rolledGraph ??= rollupToContainers(this.fullGraph);
       // Hard render cap on the overview: the rollup can still be huge (graphs
       // dominated by types that don't roll up — labels, custom metadata, objects).
@@ -282,6 +342,7 @@ export class GraphPanel {
         expandedCount: this.explore.size,
         capDropped,
         rootInfo,
+        focusInfo,
       },
     });
   }
@@ -314,10 +375,16 @@ export class GraphPanel {
       <input id="search" type="search" placeholder="Search nodes… (Enter to focus)" autocomplete="off" spellcheck="false" />
       <span id="status"></span>
       <button id="mode" class="mode-btn" hidden></button>
+      <button id="focus" class="mode-btn" hidden title="Scope the map to one node: highlight it and its neighborhood, fade the rest. Adjust depth in the detail panel.">Focus</button>
       <span id="explore-bar" class="focus-bar" hidden>
         <span class="focus-tag">exploring</span>
         <span id="explore-count" class="focus-label"></span>
         <button id="explore-reset" title="Collapse all reveals and return to the overview">✕ reset</button>
+      </span>
+      <span id="focus-bar" class="focus-bar" hidden>
+        <span class="focus-tag">focus</span>
+        <span id="focus-label" class="focus-label"></span>
+        <button id="focus-clear" title="Clear focus and show the whole view again">✕ clear</button>
       </span>
       <span class="spacer"></span>
       <button id="layout-mode" class="layout-btn" title="Toggle layout: force-directed vs grouped by type">Layout: Force</button>

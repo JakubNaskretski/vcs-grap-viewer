@@ -80,7 +80,7 @@ export function activate(context: vscode.ExtensionContext): void {
       try {
         const started = Date.now();
         let timings: BuildTimings | undefined;
-        const entry = await vscode.window.withProgress(
+        const built = await vscode.window.withProgress(
           {
             location: vscode.ProgressLocation.Notification,
             title: `Building graph from "${path.basename(folder.fsPath)}"…`,
@@ -111,12 +111,27 @@ export function activate(context: vscode.ExtensionContext): void {
             );
             if (result === undefined) return undefined; // cancelled
             timings = result.timings;
-            return library.add(path.basename(folder.fsPath), normalizeGraph(result.graph), folder.fsPath);
+            return normalizeGraph(result.graph);
           },
         );
-        if (!entry) return; // cancelled
+        if (!built) return; // cancelled
+        const took = fmtDuration(Date.now() - started); // build time — captured before the name prompt
+        // Name it: default pre-filled and fully selected for quick overtype; Escape keeps the default
+        // so a finished build is never lost to a dismissed prompt. Rename any time from the Graphs panel.
+        const suggested = defaultGraphName(folder.fsPath);
+        const typed = await vscode.window.showInputBox({
+          title: "Name this graph",
+          value: suggested,
+          valueSelection: [0, suggested.length],
+          prompt: "Shown in the Graphs panel — you can rename it later.",
+        });
+        const entry = await library.add(
+          (typed ?? suggested).trim() || suggested,
+          built,
+          folder.fsPath,
+          includedLabels(include),
+        );
         libraryView.refresh();
-        const took = fmtDuration(Date.now() - started);
         if (timings) {
           log.appendLine(
             `[build] ${folder.fsPath} — ${entry.nodeCount} nodes, ${entry.edgeCount} edges in ${took} ` +
@@ -150,8 +165,45 @@ export function activate(context: vscode.ExtensionContext): void {
       libraryView.refresh();
     }),
 
+    vscode.commands.registerCommand("graphViewer.renameStored", async (entry: GraphEntry) => {
+      if (!entry) return;
+      const typed = await vscode.window.showInputBox({
+        title: "Rename graph",
+        value: entry.name,
+        valueSelection: [0, entry.name.length],
+        prompt: "New name for this graph.",
+      });
+      const name = typed?.trim();
+      if (!name || name === entry.name) return;
+      await library.rename(entry.id, name);
+      libraryView.refresh();
+    }),
+
     vscode.commands.registerCommand("graphViewer.refreshLibrary", () => libraryView.refresh()),
   );
+}
+
+// Generic Salesforce layout dirs that say nothing about the org — skipped when
+// deriving a default graph name so we land on the meaningful folder (the repo/org).
+const GENERIC_DIRS = new Set(["main", "default", "force-app", "src", "metadata", "classes", "unpackaged"]);
+
+/** A meaningful default name for a graph built from `folderPath`: the nearest path
+ *  segment that isn't a generic SF layout dir (so `…/AcmeOrg/force-app/main/default`
+ *  becomes "AcmeOrg", not "default"). */
+function defaultGraphName(folderPath: string): string {
+  const segs = folderPath.split(path.sep).filter(Boolean);
+  for (let i = segs.length - 1; i >= 0; i--) {
+    if (!GENERIC_DIRS.has(segs[i].toLowerCase())) return segs[i];
+  }
+  return segs[segs.length - 1] || "graph";
+}
+
+/** Human labels for the chosen source-type keys, for display on the entry.
+ *  Returns `undefined` when everything was selected (the entry then reads "all types"). */
+function includedLabels(include: string[]): string[] | undefined {
+  if (!include.length || include.length >= GROUP_CATALOG.length) return undefined;
+  const byKey = new Map(GROUP_CATALOG.map((g) => [g.key, g.label]));
+  return include.map((k) => byKey.get(k) ?? k).sort();
 }
 
 async function openStored(

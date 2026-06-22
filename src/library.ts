@@ -11,6 +11,7 @@ export interface GraphEntry {
   nodeCount: number;
   edgeCount: number;
   source?: string; // where it came from (imported path / generated source)
+  sourceTypes?: string[]; // human labels of the metadata types built in; absent = all types
   createdAt: number; // epoch ms
 }
 
@@ -46,7 +47,7 @@ export class GraphLibrary {
   }
 
   /** Save a graph under a friendly name; returns its new index entry. */
-  async add(name: string, graph: Graph, source?: string): Promise<GraphEntry> {
+  async add(name: string, graph: Graph, source?: string, sourceTypes?: string[]): Promise<GraphEntry> {
     await fs.mkdir(this.graphsDir, { recursive: true });
     const entries = await this.list();
     const entry: GraphEntry = {
@@ -55,6 +56,7 @@ export class GraphLibrary {
       nodeCount: graph.nodes.length,
       edgeCount: graph.edges.length,
       source,
+      sourceTypes,
       createdAt: Date.now(),
     };
     await fs.writeFile(this.pathFor(entry.id), JSON.stringify(toDisk(graph), null, 2), "utf8");
@@ -70,6 +72,18 @@ export class GraphLibrary {
     } catch {
       /* already gone */
     }
+  }
+
+  /** Rename a stored graph (display name only — the id and on-disk file stay put,
+   *  so open panels and references keep working). No-op if blank or id unknown. */
+  async rename(id: string, name: string): Promise<void> {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    const entries = await this.list();
+    const entry = entries.find((e) => e.id === id);
+    if (!entry) return;
+    entry.name = trimmed;
+    await this.writeIndex(entries);
   }
 
   /** Import an external graph.json file into the library. */
@@ -125,8 +139,17 @@ export class GraphLibraryProvider implements vscode.TreeDataProvider<GraphEntry>
 
   getTreeItem(entry: GraphEntry): vscode.TreeItem {
     const item = new vscode.TreeItem(entry.name, vscode.TreeItemCollapsibleState.None);
-    item.description = `${entry.nodeCount} nodes · ${entry.edgeCount} edges`;
-    item.tooltip = entry.source ? `${entry.name}\nfrom ${entry.source}` : entry.name;
+    // Row stays compact: node count + a type-count hint. The full "what was it
+    // built from" lives in the hover tooltip, where there's room for it.
+    const typeHint = entry.sourceTypes ? `${entry.sourceTypes.length} types` : "all types";
+    item.description = `${entry.nodeCount.toLocaleString()} nodes · ${typeHint}`;
+    const tip = new vscode.MarkdownString();
+    tip.appendMarkdown(`**${entry.name}**\n\n`);
+    tip.appendMarkdown(`${entry.nodeCount.toLocaleString()} nodes · ${entry.edgeCount.toLocaleString()} edges\n\n`);
+    tip.appendMarkdown(`**Source types:** ${entry.sourceTypes?.length ? entry.sourceTypes.join(", ") : "All types"}\n\n`);
+    if (entry.source) tip.appendMarkdown(`**Built from:** \`${entry.source}\`\n\n`);
+    tip.appendMarkdown(`**Created:** ${new Date(entry.createdAt).toLocaleString()}`);
+    item.tooltip = tip;
     item.contextValue = "graphEntry";
     item.iconPath = new vscode.ThemeIcon("type-hierarchy-sub");
     item.command = { command: "graphViewer.openStored", title: "Open Graph", arguments: [entry] };
