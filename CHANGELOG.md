@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.8.2
+
+### Focus is much clearer now
+
+- **Focusing a node shows just its neighborhood, laid out fresh** — so the nodes spread
+  out and the connections between them are actually visible, instead of staying buried in
+  the full crowded map. Switch the scope to **fade rest** any time to keep the surrounding
+  context instead.
+- **The focused node stands out.** The selected node is now noticeably larger, and the
+  detail panel shows a quick summary of how many nodes and connections are in view.
+- **Nodes are spread farther apart** so labels overlap less in every view.
+- **Calmer mouse-wheel zoom.** Trackpad momentum that could make the zoom flicker back
+  and forth is now ignored.
+
 ## 0.8.1
 
 - **Focus: the minimum depth is now 1, so a focused node always shows its direct

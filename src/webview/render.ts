@@ -13,7 +13,14 @@ export interface DetailCtx {
   /** Focus state (flat view only): the depth + direction of the neighborhood scope
    *  and whether unrelated nodes are faded (webview) or hidden (host-culled).
    *  Present only when Focus is on, driving the Focus block's controls. */
-  focus?: { depth: number; direction: "out" | "in" | "both"; mode: "fade" | "hide" };
+  focus?: {
+    depth: number;
+    direction: "out" | "in" | "both";
+    mode: "fade" | "hide";
+    /** Size of the scoped neighborhood (selected node + everything within `depth`). */
+    scopeNodes: number;
+    scopeEdges: number;
+  };
 }
 
 /** Build the detail-panel HTML for one node: header, attributes, relationships. */
@@ -107,7 +114,11 @@ function renderExplore(ctx?: DetailCtx): string {
 // in fade mode). Only rendered when Focus is on (ctx.focus present).
 function renderFocus(ctx?: DetailCtx): string {
   if (!ctx?.focus) return "";
-  const { depth, direction, mode } = ctx.focus;
+  const { depth, direction, mode, scopeNodes, scopeEdges } = ctx.focus;
+  const summary =
+    `<div class="x-summary">Showing <b>${scopeNodes.toLocaleString()}</b> ${scopeNodes === 1 ? "node" : "nodes"} · ` +
+    `<b>${scopeEdges.toLocaleString()}</b> ${scopeEdges === 1 ? "connection" : "connections"} ` +
+    `within ${depth} ${depth === 1 ? "hop" : "hops"}</div>`;
   const minus = `<button class="x-step" data-focus="depth" data-dir="-1"${depth <= 1 ? " disabled" : ""} title="Fewer hops">−</button>`;
   const plus = `<button class="x-step" data-focus="depth" data-dir="1" title="More hops">＋</button>`;
   const dir = (d: "out" | "in" | "both") =>
@@ -116,6 +127,7 @@ function renderFocus(ctx?: DetailCtx): string {
     `<button class="x-toggle${mode === m ? " on" : ""}" data-focus="mode" data-dir="${m}" title="${tip}">${lbl}</button>`;
   return (
     `<section class="d-section x-explore"><h3>Focus</h3>` +
+    summary +
     `<div class="x-row"><span class="x-label">Depth</span><span class="x-stepper">${minus}<span class="x-count">${depth} ${depth === 1 ? "hop" : "hops"}</span>${plus}</span></div>` +
     `<div class="x-row"><span class="x-label">Direction</span><span class="x-stepper">${dir("out")}${dir("in")}${dir("both")}</span></div>` +
     `<div class="x-row"><span class="x-label">Scope</span><span class="x-stepper">${scope("fade", "fade rest", "Dim everything outside the neighborhood — keeps context; best when the graph already fits")}${scope("hide", "only this", "Render only the neighborhood and cull the rest — the way to explore a huge graph")}</span></div>` +

@@ -465,6 +465,18 @@ button:hover {
   opacity: 0.85;
 }
 
+.x-summary {
+  font-size: 12px;
+  opacity: 0.8;
+  margin-bottom: 8px;
+  line-height: 1.5;
+}
+
+.x-summary b {
+  opacity: 1;
+  font-weight: 600;
+}
+
 .x-toggle,
 .x-step {
   font: inherit;

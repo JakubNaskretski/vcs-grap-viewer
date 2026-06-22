@@ -90,6 +90,29 @@ const groupOverlayEl = document.createElement("div");
 groupOverlayEl.id = "group-overlay";
 cyEl.appendChild(groupOverlayEl);
 
+// Tame trackpad/momentum zoom: during inertial scrolling the wheel delta can flip
+// sign and make the zoom oscillate back and forth. Within a quick gesture, drop any
+// event whose direction reverses the established one (a deliberate reverse after a
+// short pause still works). Capture + non-passive so it pre-empts sigma's wheel zoom.
+// Attached once (not per-build) so listeners don't accumulate across graph loads.
+let lastWheelDir = 0;
+let lastWheelT = 0;
+cyEl.addEventListener(
+  "wheel",
+  (e) => {
+    const dir = Math.sign(e.deltaY);
+    const t = performance.now();
+    if (dir !== 0 && lastWheelDir !== 0 && dir !== lastWheelDir && t - lastWheelT < 140) {
+      e.stopImmediatePropagation();
+      e.preventDefault();
+      return;
+    }
+    if (dir !== 0) lastWheelDir = dir;
+    lastWheelT = t;
+  },
+  { capture: true, passive: false },
+);
+
 // ---- state ----
 let renderer: Sigma | undefined; // the sigma WebGL renderer
 let model: Graphology | undefined; // the graphology graph model (nodes/edges + attrs)
@@ -129,7 +152,10 @@ interface FocusState {
   direction: "out" | "in" | "both";
   mode: "fade" | "hide";
 }
-let focusState: FocusState = { active: false, rootId: undefined, depth: 1, direction: "both", mode: "fade" };
+// Default to "hide": culling to just the neighborhood re-lays-it-out so nodes spread,
+// labels are readable, and the lines between them are visible — far clearer than
+// "fade", which keeps the full crowded layout and only dims the rest.
+let focusState: FocusState = { active: false, rootId: undefined, depth: 1, direction: "both", mode: "hide" };
 
 // Layout mode: "force" = force-directed (forceAtlas2); "grouped" = one island per
 // node type. Grouped trades intra-group connectivity for clean separation by color.
@@ -441,9 +467,11 @@ function nodeReducer(node: string, data: Record<string, unknown>): Partial<NodeD
     if (node === selectedId) {
       res.highlighted = true;
       res.forceLabel = true;
+      res.size = baseSize * 1.8; // the focused node is clearly the biggest thing on screen
       res.zIndex = 2;
     } else if (selSet?.has(node)) {
       res.forceLabel = true;
+      res.size = baseSize * 1.25; // its neighborhood is enlarged a touch above the rest
       res.zIndex = 1;
     } else if (
       focusState.active &&
@@ -571,8 +599,8 @@ function runForceLayout(): void {
       // Spread harder: weak gravity so things don't pile into one clump, high
       // repulsion (scalingRatio) to push neighbors apart, Barnes-Hut to stay cheap
       // on big/dense slices. Maps the old fcose spread knobs onto FA2.
-      gravity: 0.4,
-      scalingRatio: 8 + spacing / 18,
+      gravity: 0.3,
+      scalingRatio: 16 + spacing / 9,
       slowDown: 1 + nodes / 5000,
       barnesHutOptimize: nodes > 1000,
       barnesHutTheta: 0.6,
@@ -931,7 +959,13 @@ function renderDetailForSelection(): void {
         : undefined,
     focus:
       focusState.active && currentMeta?.mode === "all"
-        ? { depth: focusState.depth, direction: focusState.direction, mode: focusState.mode }
+        ? {
+            depth: focusState.depth,
+            direction: focusState.direction,
+            mode: focusState.mode,
+            scopeNodes: selSet?.size ?? 0,
+            scopeEdges: selEdges?.size ?? 0,
+          }
         : undefined,
   });
 }
